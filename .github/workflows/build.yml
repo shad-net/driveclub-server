@@ -42,10 +42,10 @@ jobs:
         include:
           - name: Linux
             os: ubuntu-24.04
-            artifact: driveclub-linux
+            artifact: driveclubsrv-linux
           - name: Windows
             os: windows-2022
-            artifact: driveclub-windows
+            artifact: driveclubsrv-windows
 
     steps:
       - uses: actions/checkout@v7
@@ -67,7 +67,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir dist
-          cp build/driveclub README.md dist/
+          cp build/driveclubsrv README.md dist/
 
       - name: Collect (Windows)
         if: runner.os == 'Windows'
