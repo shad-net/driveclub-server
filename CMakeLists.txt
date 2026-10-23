@@ -16,6 +16,7 @@ add_executable(driveclubsrv
     src/handler.cpp src/handler.h
     src/http_server.cpp src/http_server.h
     src/main.cpp
+    src/trace.cpp src/trace.h
 )
 target_link_libraries(driveclubsrv PRIVATE Qt6::Core Qt6::Network)
 

@@ -67,6 +67,19 @@ std::optional<Config> loadConfig(const QByteArray& json, QString* error) {
         }
         c.logMaxBytes = mb * 1024 * 1024;
     }
+    if (log.contains("trace")) {
+        if (!log.value("trace").isBool()) {
+            return failed(error, QStringLiteral("log.trace must be true or false"));
+        }
+        c.trace = log.value("trace").toBool();
+    }
+    if (log.contains("trace_body_bytes")) {
+        qint64 bytes = 0;
+        if (!readInt(log.value("trace_body_bytes"), 0, 16 * 1024 * 1024, &bytes)) {
+            return failed(error, QStringLiteral("log.trace_body_bytes must be 0..16777216"));
+        }
+        c.traceBodyBytes = bytes;
+    }
     return c;
 }
 
@@ -74,7 +87,7 @@ QByteArray defaultConfigJson() {
     return QByteArrayLiteral(R"({
     "listen": { "address": "0.0.0.0", "port": 8080 },
     "base_path": "",
-    "log": { "file": "server.log", "max_size_mb": 10 }
+    "log": { "file": "server.log", "max_size_mb": 50, "trace": true, "trace_body_bytes": 65536 }
 }
 )");
 }

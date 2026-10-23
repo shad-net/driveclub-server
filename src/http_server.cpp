@@ -3,6 +3,8 @@
 
 #include "http_server.h"
 
+#include <QDateTime>
+#include <QLoggingCategory>
 #include <QPointer>
 #include <QTcpSocket>
 #include <QTimer>
@@ -12,8 +14,11 @@
 
 namespace {
 
+Q_LOGGING_CATEGORY(lcConn, "conn")
+
 constexpr qsizetype MaxHeaderBytes = 16 * 1024;
-constexpr qsizetype MaxBodyBytes = 1024 * 1024;
+// Ghost and /egs/binary uploads can be larger than a JSON call.
+constexpr qsizetype MaxBodyBytes = 16 * 1024 * 1024;
 constexpr int IdleTimeoutMs = 60 * 1000;
 
 QByteArray reasonPhrase(int status) {
@@ -62,6 +67,10 @@ struct Parsed {
 
 // Decodes a chunked body starting at `pos`. Returns the end offset, or nullopt if more data is
 // needed.
+QString peerName(const QTcpSocket* socket) {
+    return QStringLiteral("%1:%2").arg(socket->peerAddress().toString()).arg(socket->peerPort());
+}
+
 std::optional<qsizetype> decodeChunked(const QByteArray& buf, qsizetype pos, QByteArray* body,
                                        bool* error) {
     for (;;) {
@@ -183,11 +192,31 @@ void HttpServer::onNewConnection() {
         auto* idle = new QTimer(socket);
         idle->setSingleShot(true);
         idle->setInterval(IdleTimeoutMs);
-        connect(idle, &QTimer::timeout, socket, &QTcpSocket::disconnectFromHost);
+        connect(idle, &QTimer::timeout, socket, [socket] {
+            qCInfo(lcConn).noquote() << "closing idle connection" << peerName(socket) << "after"
+                                     << IdleTimeoutMs / 1000 << "s without data";
+            socket->disconnectFromHost();
+        });
         idle->start();
+        const QString peer = peerName(socket);
         socket->setProperty("idleTimer", QVariant::fromValue(static_cast<QObject*>(idle)));
+        socket->setProperty("openedAt", QDateTime::currentMSecsSinceEpoch());
+        socket->setProperty("requests", 0);
+        qCInfo(lcConn).noquote() << "connection from" << peer;
         connect(socket, &QTcpSocket::readyRead, this, [this, socket] { onReadyRead(socket); });
-        connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+        connect(socket, &QTcpSocket::disconnected, socket, [socket, peer] {
+            const qint64 ms =
+                QDateTime::currentMSecsSinceEpoch() - socket->property("openedAt").toLongLong();
+            QString line = QStringLiteral("connection from %1 closed after %2 ms, %3 requests")
+                               .arg(peer)
+                               .arg(ms)
+                               .arg(socket->property("requests").toInt());
+            if (!socket->property("buffer").toByteArray().isEmpty()) {
+                line += QStringLiteral(" (unfinished request discarded)");
+            }
+            qCInfo(lcConn).noquote() << line;
+            socket->deleteLater();
+        });
     }
 }
 
@@ -204,12 +233,28 @@ void HttpServer::processNext(QTcpSocket* socket) {
         return;
     }
     QByteArray buffer = socket->property("buffer").toByteArray();
+    // A TLS ClientHello (0x16 0x03 ..) never completes an HTTP header, so catch it here. The game
+    // talks https to EGS (gmServer) and to the OTG hub.
+    if (buffer.size() >= 2 && static_cast<unsigned char>(buffer[0]) == 0x16 &&
+        static_cast<unsigned char>(buffer[1]) == 0x03) {
+        qCWarning(lcConn).noquote()
+            << "TLS handshake from" << peerName(socket)
+            << "on the plain HTTP port: the client is using https. Put a TLS proxy in front of"
+               " this server, or make the client use http.";
+        socket->setProperty("buffer", QByteArray());
+        socket->setProperty("closing", true);
+        socket->disconnectFromHost();
+        return;
+    }
     Parsed parsed;
     const ParseResult result = parse(buffer, &parsed);
     if (result == ParseResult::Incomplete) {
         return;
     }
     if (result == ParseResult::Error) {
+        qCWarning(lcConn).noquote()
+            << "bad request from" << peerName(socket) << "->" << parsed.errorStatus
+            << reasonPhrase(parsed.errorStatus) << "first bytes:" << buffer.left(64).toHex(' ');
         HttpResponse response;
         response.status = parsed.errorStatus;
         response.contentType = "text/plain";
@@ -221,6 +266,7 @@ void HttpServer::processNext(QTcpSocket* socket) {
     buffer.remove(0, parsed.consumed);
     socket->setProperty("buffer", buffer);
     socket->setProperty("busy", true);
+    socket->setProperty("requests", socket->property("requests").toInt() + 1);
     parsed.request.peer = socket->peerAddress();
 
     QPointer<QTcpSocket> guard(socket);
@@ -248,6 +294,9 @@ void HttpServer::send(QTcpSocket* socket, const HttpResponse& response, bool kee
                       reasonPhrase(response.status) + "\r\n";
     head += "Content-Type: " + response.contentType + "\r\n";
     head += "Content-Length: " + QByteArray::number(response.body.size()) + "\r\n";
+    for (const auto& [key, value] : response.headers) {
+        head += key + ": " + value + "\r\n";
+    }
     head += keepAlive ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
     head += "\r\n";
     socket->write(head + response.body);

@@ -6,7 +6,9 @@
 #include <QByteArray>
 #include <QHash>
 #include <QHostAddress>
+#include <QList>
 #include <QObject>
+#include <QPair>
 #include <QString>
 #include <QTcpServer>
 #include <QUrlQuery>
@@ -27,6 +29,8 @@ struct HttpRequest {
 struct HttpResponse {
     int status = 200;
     QByteArray contentType = QByteArrayLiteral("application/octet-stream");
+    // Extra headers, e.g. EGS's X-Response-Signature or X-Service-Error.
+    QList<QPair<QByteArray, QByteArray>> headers;
     QByteArray body;
 };
 

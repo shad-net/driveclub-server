@@ -5,52 +5,22 @@
 #include "file_log.h"
 #include "handler.h"
 #include "http_server.h"
+#include "trace.h"
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QLoggingCategory>
 
-#include <algorithm>
 #include <cstdio>
 
 namespace {
 
-Q_LOGGING_CATEGORY(lcRequest, "request")
-
-constexpr qsizetype BodyPreviewBytes = 512;
-
 int fatal(const QString& message) {
     std::fprintf(stderr, "error: %s\n", qPrintable(message));
     return 1;
-}
-
-QString preview(const QByteArray& body) {
-    const QByteArray head = body.left(BodyPreviewBytes);
-    const bool text = std::all_of(head.begin(), head.end(), [](char c) {
-        const auto u = static_cast<unsigned char>(c);
-        return u >= 0x20 || c == '\n' || c == '\r' || c == '\t';
-    });
-    QString out = text ? QString::fromUtf8(head) : QString::fromLatin1(head.toHex(' '));
-    if (body.size() > head.size()) {
-        out += QStringLiteral(" ... (%1 more bytes)").arg(body.size() - head.size());
-    }
-    return out;
-}
-
-void logRequest(const HttpRequest& request) {
-    const QString query = request.query.isEmpty() ? QString() : '?' + request.query.toString();
-    qCInfo(lcRequest).noquote() << QString::fromLatin1(request.method) + ' ' + request.path + query
-                                << "from" << request.peer.toString();
-    for (auto it = request.headers.constBegin(); it != request.headers.constEnd(); ++it) {
-        qCInfo(lcRequest).noquote()
-            << "  " + QString::fromLatin1(it.key()) + ":" << QString::fromLatin1(it.value());
-    }
-    if (!request.body.isEmpty()) {
-        qCInfo(lcRequest).noquote()
-            << "  body" << request.body.size() << "bytes:" << preview(request.body);
-    }
 }
 
 } // namespace
@@ -58,7 +28,8 @@ void logRequest(const HttpRequest& request) {
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("driveclub-server"));
-    qSetMessagePattern(QStringLiteral("%{time yyyy-MM-dd hh:mm:ss} [%{type}] %{message}"));
+    qSetMessagePattern(QStringLiteral(
+        "%{time yyyy-MM-dd hh:mm:ss.zzz} [%{type}] %{if-category}%{category}: %{endif}%{message}"));
 
     const QString configPath = QStringLiteral("config.json");
     if (!QFileInfo::exists(configPath)) {
@@ -89,9 +60,19 @@ int main(int argc, char* argv[]) {
               static_cast<long long>(config->logMaxBytes / (1024 * 1024)));
     }
 
+    setTraceOptions({config->trace, static_cast<qsizetype>(config->traceBodyBytes)});
+
     const QString basePath = config->basePath;
-    HttpServer server([basePath](const HttpRequest& request, HttpServer::Responder respond) {
-        logRequest(request);
+    HttpServer server([basePath](const HttpRequest& request, HttpServer::Responder reply) {
+        // Every answer goes through here, so each request is traced together with its answer.
+        const QString label = endpointLabel(request);
+        const quint64 id = traceRequest(request, label);
+        QElapsedTimer timer;
+        timer.start();
+        auto respond = [reply, id, label, timer](HttpResponse response) {
+            traceResponse(id, label, response, timer.elapsed());
+            reply(std::move(response));
+        };
         QString path = request.path;
         if (!basePath.isEmpty()) {
             if (!path.startsWith(basePath + '/')) {
@@ -113,7 +94,9 @@ int main(int argc, char* argv[]) {
                          .arg(config->port)
                          .arg(error));
     }
-    qInfo("listening on %s:%u, endpoints under %s", qPrintable(config->address.toString()),
-          config->port, qPrintable(basePath.isEmpty() ? QStringLiteral("/") : basePath));
+    qInfo("listening on %s:%u, endpoints under %s, trace %s",
+          qPrintable(config->address.toString()), config->port,
+          qPrintable(basePath.isEmpty() ? QStringLiteral("/") : basePath),
+          config->trace ? "on" : "off");
     return app.exec();
 }
