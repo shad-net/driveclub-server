@@ -1,0 +1,66 @@
+// SPDX-FileCopyrightText: Copyright 2026 Driveclub Custom Server Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+syntax = "proto2";
+
+message Empty {}
+
+// indexService
+
+// indexService.getSvcEndpointList, read per endpoint at 0xA29DA5..0xA2A86A.
+message SvcEndpointDescriptor {
+  optional string service = 1;
+  optional string serviceMethod = 2;
+  optional string requestMessage = 3;
+  optional string responseMessage = 4;
+  optional string httpMethod = 5;
+  optional bool secure = 6;
+  optional int32 initialTokens = 7;
+  optional int32 maxTokens = 8;
+  optional int32 tokensPerMinute = 9;
+  optional bool available = 10;  // false: the method is marked unavailable for 300 s
+}
+
+message SvcEndpointDescriptorList {
+  repeated SvcEndpointDescriptor endpoints = 1;
+}
+
+// systemService
+
+// systemService.getVersion, read at 0xA330BD / 0xA33167. serverIdentifier must be contained
+// in every OTG_Service_* TSS value.
+message GetVersionResponse {
+  optional string version = 1;
+  optional string serverIdentifier = 2;
+}
+
+// sessionService
+
+// sessionService.oauthLogin / oauthRefresh, built at 0xA34440..0xA34997.
+message OAuthLoginRequest {
+  optional string authCode = 1;             // NpAuth authorization code
+  optional string clientVersion = 2;        // e.g. "CV_bM_tP_p128_x3"
+  optional bytes clientSessionData = 3;
+  optional int64 clientNatIdentifier = 4;
+  optional bool psPlus = 5;
+  optional bool trial = 6;
+  optional string name = 7;                 // online id
+  optional string fbAuthToken = 8;
+}
+
+// Read at 0xA34D83..0xA34EDA as sessionkey.accountId, sessionkey.username, sessionkey.id.
+message SessionKey {
+  optional string id = 1;
+  optional int32 accountId = 2;
+  optional string username = 3;
+}
+
+message OAuthLoginResponse {
+  optional SessionKey sessionkey = 1;
+  optional int32 retryHint = 2;  // read when the login failed (0xA35106)
+}
+
+// Body of any EGS answer with HTTP status >= 500 (decoded by name at 0xA2ED5F). Fields not
+// traced yet.
+message StatusResult {
+}

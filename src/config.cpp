@@ -80,6 +80,29 @@ std::optional<Config> loadConfig(const QByteArray& json, QString* error) {
         }
         c.traceBodyBytes = bytes;
     }
+
+    const QJsonObject egs = root.value("egs").toObject();
+    if (egs.contains("server_identifier")) {
+        c.egs.serverIdentifier = egs.value("server_identifier").toString();
+        if (c.egs.serverIdentifier.isEmpty()) {
+            return failed(error, QStringLiteral("egs.server_identifier must not be empty"));
+        }
+    }
+    if (egs.contains("version")) {
+        c.egs.version = egs.value("version").toString();
+    }
+
+    const QJsonObject otg = root.value("otg").toObject();
+    c.otg.baseUrl = otg.value("base_url").toString();
+    while (c.otg.baseUrl.endsWith('/')) {
+        c.otg.baseUrl.chop(1);
+    }
+    if (otg.contains("domain_id")) {
+        c.otg.domainId = otg.value("domain_id").toString();
+    }
+    if (otg.contains("zone")) {
+        c.otg.zone = otg.value("zone").toString();
+    }
     return c;
 }
 
@@ -87,7 +110,9 @@ QByteArray defaultConfigJson() {
     return QByteArrayLiteral(R"({
     "listen": { "address": "0.0.0.0", "port": 8080 },
     "base_path": "",
-    "log": { "file": "server.log", "max_size_mb": 50, "trace": true, "trace_body_bytes": 65536 }
+    "log": { "file": "server.log", "max_size_mb": 50, "trace": true, "trace_body_bytes": 65536 },
+    "egs": { "server_identifier": "dc-community", "version": "1" },
+    "otg": { "base_url": "", "domain_id": "driveclub", "zone": "eu" }
 }
 )");
 }

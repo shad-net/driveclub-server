@@ -6,6 +6,7 @@ path = [
     "CMakeSettings.json",
     ".github/workflows/*.*",
     ".gitignore",
+    ".gitmodules",
     "README.md"
 ]
 precedence = "aggregate"

@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "config.h"
+#include "egs.h"
 #include "file_log.h"
 #include "handler.h"
 #include "http_server.h"
+#include "otg.h"
 #include "trace.h"
 
 #include <QCoreApplication>
@@ -61,6 +63,10 @@ int main(int argc, char* argv[]) {
     }
 
     setTraceOptions({config->trace, static_cast<qsizetype>(config->traceBodyBytes)});
+    setEgsConfig(config->egs);
+    setOtgConfig(config->otg);
+    qInfo("EGS serverIdentifier \"%s\" (each OTG_Service_* TSS value must contain it)",
+          qPrintable(config->egs.serverIdentifier));
 
     const QString basePath = config->basePath;
     HttpServer server([basePath](const HttpRequest& request, HttpServer::Responder reply) {
@@ -69,8 +75,8 @@ int main(int argc, char* argv[]) {
         const quint64 id = traceRequest(request, label);
         QElapsedTimer timer;
         timer.start();
-        auto respond = [reply, id, label, timer](HttpResponse response) {
-            traceResponse(id, label, response, timer.elapsed());
+        auto respond = [reply, id, label, timer, request](HttpResponse response) {
+            traceResponse(id, label, request, response, timer.elapsed());
             reply(std::move(response));
         };
         QString path = request.path;

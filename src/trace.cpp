@@ -3,6 +3,9 @@
 
 #include "trace.h"
 
+#include "egs.h"
+#include "proto_dump.h"
+
 #include <QAtomicInteger>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -23,7 +26,6 @@ TraceOptions& options() {
 
 QAtomicInteger<quint64> nextId{1};
 
-// Headers the game sends or expects on EGS and OTG calls
 bool isGameHeader(const QByteArray& name) {
     static const QByteArrayList names = {
         "authorization", "x-sessionkey",    "x-request-signature", "x-response-signature",
@@ -37,11 +39,13 @@ struct Rule {
     QString label;
 };
 
+// Order matters: the first match wins.
 const QList<Rule>& rules() {
     static const QList<Rule> list = [] {
         const QList<QPair<const char*, const char*>> raw = {
             // EGS, https://<gmServer>/egs ... ("%s://%s:%d%s/direct%s%s")
             {"^/egs/binary(/|$)", "EGS binary"},
+            {"^/egs/messaging(/|$)", "EGS messaging"},
             {"^/egs/direct(/|$)", "EGS direct"},
             {"^/egs/?$", "EGS index"},
             {"^/egs/", "EGS"},
@@ -94,7 +98,6 @@ bool isPrintable(const QByteArray& data) {
     });
 }
 
-// EGS JSON requests carry "serviceMethod"
 QString egsMethod(const QByteArray& body) {
     if (!looksLikeJson(body)) {
         return {};
@@ -118,7 +121,8 @@ void logLines(quint64 id, const QString& prefix, const QString& text) {
     }
 }
 
-void traceBody(quint64 id, const QByteArray& body, const QByteArray& contentType) {
+void traceBody(quint64 id, const QByteArray& body, const QByteArray& contentType,
+               const QString& decoded = {}) {
     if (body.isEmpty()) {
         return;
     }
@@ -154,7 +158,28 @@ void traceBody(quint64 id, const QByteArray& body, const QByteArray& contentType
         qCInfo(lcTrace).noquote()
             << QStringLiteral("#%1   (not valid JSON: %2)").arg(id).arg(err.errorString());
     }
+    if (!decoded.isEmpty()) {
+        logLines(id, QStringLiteral("   ~ "), decoded);
+    } else if (kind == QLatin1String("binary")) {
+        // Unknown protobuf (a method not in egs.proto yet): field numbers only.
+        QStringList fields;
+        if (dumpProto(limit > 0 ? body.left(limit) : body, &fields) && !fields.isEmpty()) {
+            qCInfo(lcTrace).noquote() << QStringLiteral("#%1   protobuf:").arg(id);
+            logLines(id, QStringLiteral("   ~ "), fields.join('\n'));
+        }
+    }
     logLines(id, QStringLiteral("   | "), dumpBody(body, limit));
+}
+
+// "/egs/binary/<service>/<method>" -> {service, method}
+QStringList egsPathParts(const QString& path) {
+    for (const QLatin1String prefix :
+         {QLatin1String("/egs/binary/"), QLatin1String("/egs/direct/")}) {
+        if (path.startsWith(prefix)) {
+            return path.mid(prefix.size()).split('/', Qt::SkipEmptyParts);
+        }
+    }
+    return {};
 }
 
 } // namespace
@@ -172,13 +197,9 @@ QString endpointLabel(const HttpRequest& request) {
         if (!rule.pattern.match(request.path).hasMatch()) {
             continue;
         }
-        if (rule.label == QLatin1String("EGS direct")) {
-            // /egs/direct/<service>/<method> -> "service.method"
-            const QString rest = request.path.mid(request.path.indexOf("/direct") + 7);
-            const QStringList parts = rest.split('/', Qt::SkipEmptyParts);
-            if (!parts.isEmpty()) {
-                return rule.label + ' ' + parts.join('.');
-            }
+        const QStringList parts = egsPathParts(request.path);
+        if (!parts.isEmpty()) {
+            return rule.label + ' ' + parts.join('.');
         }
         return rule.label;
     }
@@ -240,12 +261,36 @@ quint64 traceRequest(const HttpRequest& request, const QString& label) {
         qCInfo(lcTrace).noquote()
             << QStringLiteral("#%1   EGS serviceMethod: %2").arg(id).arg(method);
     }
-    traceBody(id, request.body, request.headers.value("content-type").toLower());
+    const QByteArray signature = request.headers.value("x-request-signature");
+    const QStringList egs = egsPathParts(request.path);
+    if (!signature.isEmpty() && egs.size() >= 2) {
+        const auto key = egsFindSessionKey(egs.at(1), request.body, signature);
+        if (!key) {
+            qCWarning(lcTrace).noquote()
+                << QStringLiteral("#%1   signature MISMATCH for method \"%2\": no session key "
+                                  "issued by this server fits (server restarted?)")
+                       .arg(id)
+                       .arg(egs.at(1));
+        } else if (key->isEmpty()) {
+            qCInfo(lcTrace).noquote()
+                << QStringLiteral("#%1   signature ok (method \"%2\", no session)")
+                       .arg(id)
+                       .arg(egs.at(1));
+        } else {
+            qCInfo(lcTrace).noquote()
+                << QStringLiteral("#%1   signature ok (method \"%2\", session of %3)")
+                       .arg(id)
+                       .arg(egs.at(1), egsSessionName(*key));
+        }
+    }
+    traceBody(id, request.body, request.headers.value("content-type").toLower(),
+              request.body.isEmpty() ? QString()
+                                     : egsDescribeBody(request.path, false, 0, request.body));
     return id;
 }
 
-void traceResponse(quint64 id, const QString& label, const HttpResponse& response,
-                   qint64 elapsedMs) {
+void traceResponse(quint64 id, const QString& label, const HttpRequest& request,
+                   const HttpResponse& response, qint64 elapsedMs) {
     const QString name = label.isEmpty() ? QStringLiteral("UNKNOWN endpoint") : label;
     const auto line = QStringLiteral("#%1 <<< %2  [%3]  %4 bytes  %5 ms")
                           .arg(id)
@@ -270,5 +315,8 @@ void traceResponse(quint64 id, const QString& label, const HttpResponse& respons
                                          .arg(isGameHeader(key) ? '*' : ' ')
                                          .arg(QString::fromLatin1(key), QString::fromLatin1(value));
     }
-    traceBody(id, response.body, response.contentType.toLower());
+    traceBody(id, response.body, response.contentType.toLower(),
+              response.body.isEmpty()
+                  ? QString()
+                  : egsDescribeBody(request.path, true, response.status, response.body));
 }

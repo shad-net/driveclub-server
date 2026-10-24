@@ -17,6 +17,6 @@ void setTraceOptions(const TraceOptions& options);
 const TraceOptions& traceOptions();
 QString endpointLabel(const HttpRequest& request);
 quint64 traceRequest(const HttpRequest& request, const QString& label);
-void traceResponse(quint64 id, const QString& label, const HttpResponse& response,
-                   qint64 elapsedMs);
+void traceResponse(quint64 id, const QString& label, const HttpRequest& request,
+                   const HttpResponse& response, qint64 elapsedMs);
 QString dumpBody(const QByteArray& body, qsizetype limit);

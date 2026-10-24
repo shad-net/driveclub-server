@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include "egs.h"
+#include "otg.h"
+
 #include <QByteArray>
 #include <QHostAddress>
 #include <QString>
@@ -22,6 +25,8 @@ struct Config {
     bool trace = true;
     // Bytes of each body to dump in a trace, 0 = whole body.
     qint64 traceBodyBytes = 64 * 1024;
+    EgsConfig egs;
+    OtgConfig otg;
 };
 
 std::optional<Config> loadConfig(const QByteArray& json, QString* error);
