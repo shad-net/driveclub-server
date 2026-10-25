@@ -8,6 +8,7 @@
 #include "egs.h"
 #include "otg.h"
 #include "request_log.h"
+#include "version.h"
 
 #include <QCryptographicHash>
 #include <QJsonArray>
@@ -209,7 +210,9 @@ HttpResponse AdminService::status() {
     const QList<RequestRecord> recent = recentRequests();
     return json(200,
                 QJsonObject{
-                    {QStringLiteral("version"), QStringLiteral("1.0")},
+                    {QStringLiteral("version"), Driveclub::Version()},
+                    {QStringLiteral("build_date"), Driveclub::BuildDate()},
+                    {QStringLiteral("build_timestamp"), Driveclub::BuildTimestamp()},
                     {QStringLiteral("uptime"), uptime_.elapsed() / 1000},
                     {QStringLiteral("listen"),
                      QStringLiteral("%1:%2").arg(config_.address.toString()).arg(config_.port)},

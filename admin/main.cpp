@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "main_window.h"
+#include "version.h"
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -10,7 +11,8 @@ int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
     QApplication::setOrganizationName(QStringLiteral("driveclub-server"));
     QApplication::setApplicationName(QStringLiteral("driveclub-admin"));
-    QApplication::setApplicationVersion(QStringLiteral("1.0"));
+    QApplication::setApplicationVersion(QStringLiteral("%1 (built %2)")
+                                          .arg(Driveclub::Version(), Driveclub::BuildTimestamp()));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Admin client for driveclub-server."));

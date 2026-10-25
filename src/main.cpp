@@ -5,6 +5,7 @@
 #include "auth.h"
 #include "config.h"
 #include "database.h"
+#include "version.h"
 #include "egs.h"
 #include "file_log.h"
 #include "handler.h"
@@ -36,11 +37,21 @@ int fatal(const QString& message) {
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("driveclub-server"));
+    QCoreApplication::setApplicationVersion(Driveclub::Version());
     qSetMessagePattern(QStringLiteral(
         "%{time yyyy-MM-dd hh:mm:ss.zzz} [%{type}] %{if-category}%{category}: %{endif}%{message}"));
+    if (app.arguments().contains(QStringLiteral("--version")) ||
+        app.arguments().contains(QStringLiteral("-v"))) {
+        std::printf("driveclub-server %s (built %s)\n", qPrintable(Driveclub::Version()),
+                    qPrintable(Driveclub::BuildTimestamp()));
+        return 0;
+    }
+    const QString versionLine = QStringLiteral("driveclub-server %1 (built %2)")
+                                    .arg(Driveclub::Version(), Driveclub::BuildTimestamp());
+    qInfo("%s", qPrintable(versionLine));
 
     const QString configPath = QStringLiteral("config.json");
-    QStringList startupNotes; // repeated into the log file once it is open
+    QStringList startupNotes{versionLine}; // repeated into the log file once it is open
     if (!QFileInfo::exists(configPath)) {
         QFile file(configPath);
         if (!file.open(QIODevice::WriteOnly) || file.write(defaultConfigJson()) < 0) {

@@ -3,6 +3,8 @@
 
 #include "main_window.h"
 
+#include "version.h"
+
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
@@ -171,8 +173,11 @@ QString enc(const QString& s) {
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
-    setWindowTitle(tr("Driveclub Admin"));
+    setWindowTitle(tr("Driveclub Admin %1").arg(Driveclub::Version()));
     resize(1100, 700);
+    auto* versionLabel = new QLabel(tr("driveclub-admin %1").arg(Driveclub::Version()));
+    versionLabel->setToolTip(tr("Built %1").arg(Driveclub::BuildTimestamp().replace('T', ' ')));
+    statusBar()->addPermanentWidget(versionLabel);
 
     QSettings settings;
     url_ = new QLineEdit(settings.value("url", QStringLiteral("http://127.0.0.1:8081")).toString());
@@ -444,15 +449,26 @@ void MainWindow::showStatus(const QJsonObject& s) {
         overviewForm_->removeRow(0);
     }
     const bool checks = !s.value("shadnet_url").toString().isEmpty();
+    const QString serverVersion = s.value("version").toString();
     server_->setText(tr("<b>driveclub-server %1</b>, up %2, game port %3")
-                         .arg(s.value("version").toString(),
-                              duration(s.value("uptime").toInteger()),
+                         .arg(serverVersion, duration(s.value("uptime").toInteger()),
                               s.value("listen").toString()));
     const auto add = [this](const QString& label, const QString& value) {
         auto* v = new QLabel(value);
         v->setTextInteractionFlags(Qt::TextSelectableByMouse);
         overviewForm_->addRow(label, v);
     };
+    QString versions =
+        tr("server %1, built %2")
+            .arg(serverVersion, s.value("build_timestamp").toString().replace('T', ' '));
+    if (!serverVersion.isEmpty() && serverVersion != Driveclub::Version()) {
+        versions += tr("  <span style='color:#b36b00'>(this admin tool is %1)</span>")
+                        .arg(Driveclub::Version());
+    }
+    add(tr("Version:"), versions);
+    add(tr("Admin tool:"),
+        tr("%1, built %2")
+            .arg(Driveclub::Version(), Driveclub::BuildTimestamp().replace('T', ' ')));
     add(tr("Signed-in players (EGS):"), QString::number(s.value("sessions").toInteger()));
     add(tr("OTG tokens:"), QString::number(s.value("otg_tokens").toInteger()));
     add(tr("Leaderboards:"), QString::number(s.value("leaderboards").toInteger()));

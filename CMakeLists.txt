@@ -63,6 +63,7 @@ add_executable(driveclubsrv
     src/request_log.cpp src/request_log.h
     src/shadnet_verifier.cpp src/shadnet_verifier.h
     src/trace.cpp src/trace.h
+    src/version.cpp src/version.h
 )
 target_link_libraries(driveclubsrv PRIVATE Qt6::Core Qt6::Network Qt6::Sql egs_proto)
 # moc only for the server itself, not for the protobuf targets in externals/.
@@ -102,7 +103,9 @@ if(DRIVECLUB_BUILD_ADMIN)
             admin/api_client.cpp admin/api_client.h
             admin/main.cpp
             admin/main_window.cpp admin/main_window.h
+            src/version.cpp src/version.h
         )
+        target_include_directories(driveclub-admin PRIVATE src)
         target_link_libraries(driveclub-admin PRIVATE Qt6::Widgets Qt6::Network)
         set_target_properties(driveclub-admin PROPERTIES AUTOMOC ON)
         if(MSVC)
