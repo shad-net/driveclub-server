@@ -5,7 +5,6 @@
 #include "auth.h"
 #include "config.h"
 #include "database.h"
-#include "version.h"
 #include "egs.h"
 #include "file_log.h"
 #include "handler.h"
@@ -13,6 +12,7 @@
 #include "otg.h"
 #include "request_log.h"
 #include "trace.h"
+#include "version.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
