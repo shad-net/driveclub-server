@@ -7,7 +7,6 @@ message Empty {}
 
 // indexService
 
-// indexService.getSvcEndpointList, read per endpoint at 0xA29DA5..0xA2A86A.
 message SvcEndpointDescriptor {
   optional string service = 1;
   optional string serviceMethod = 2;
@@ -27,8 +26,6 @@ message SvcEndpointDescriptorList {
 
 // systemService
 
-// systemService.getVersion, read at 0xA330BD / 0xA33167. serverIdentifier must be contained
-// in every OTG_Service_* TSS value.
 message GetVersionResponse {
   optional string version = 1;
   optional string serverIdentifier = 2;
@@ -36,7 +33,6 @@ message GetVersionResponse {
 
 // sessionService
 
-// sessionService.oauthLogin / oauthRefresh, built at 0xA34440..0xA34997.
 message OAuthLoginRequest {
   optional string authCode = 1;             // NpAuth authorization code
   optional string clientVersion = 2;        // e.g. "CV_bM_tP_p128_x3"
@@ -48,7 +44,6 @@ message OAuthLoginRequest {
   optional string fbAuthToken = 8;
 }
 
-// Read at 0xA34D83..0xA34EDA as sessionkey.accountId, sessionkey.username, sessionkey.id.
 message SessionKey {
   optional string id = 1;
   optional int32 accountId = 2;
@@ -60,7 +55,96 @@ message OAuthLoginResponse {
   optional int32 retryHint = 2;  // read when the login failed (0xA35106)
 }
 
-// Body of any EGS answer with HTTP status >= 500 (decoded by name at 0xA2ED5F). Fields not
-// traced yet.
 message StatusResult {
+  optional int32 retryHint = 1;
+}
+
+// profileService
+
+message GetMinimalProfilesRequest {
+  repeated int64 accounts = 1;
+  optional bool withProgression = 2;
+  optional bool withClub = 3;
+}
+
+message AccountProgression {
+  optional int64 xp = 1;
+}
+
+message MinimalProfile {
+  optional int64 accountId = 1;
+  optional string name = 2;
+  optional int64 clubId = 3;                         // read only when present
+  optional AccountProgression accountProgression = 4; // read only when present
+  optional int64 stars = 5;
+  optional int64 elite = 6;
+  optional string fbAuthToken = 7;
+}
+
+message GetMinimalProfilesResponse {
+  repeated MinimalProfile profiles = 1;
+}
+
+enum ProfileOption {
+  PROFILE_OPTION_0 = 0;
+  PROFILE_OPTION_1 = 1;
+  PROFILE_OPTION_2 = 2;
+  PROFILE_OPTION_3 = 3;
+}
+
+message GetAggregatedProfilesRequest {
+  repeated ProfileOption options = 1;
+  repeated string accountNames = 2;
+}
+
+message AccountRef {
+  optional int64 id = 1;
+  optional string name = 2;
+}
+
+message IdRef {
+  optional int64 id = 1;
+}
+
+message XpRef {
+  optional int64 xp = 1;
+}
+
+message AggregatedProfile {
+  optional AccountRef account = 1;
+  optional IdRef club = 2;          // read only when present
+  optional XpRef progression = 3;   // read only when present
+  optional int64 stars = 4;
+  optional int64 elite = 5;
+  optional string fbAuthToken = 6;
+}
+
+message GetAggregatedProfilesResponse {
+  repeated AggregatedProfile profiles = 1;
+}
+
+// friendsListService
+
+enum FriendType {
+  FRIEND_TYPE_0 = 0;
+  FRIEND_TYPE_1 = 1;
+  FRIEND_TYPE_2 = 2;
+}
+
+message GetFriendsRequest {
+  repeated FriendType friendTypes = 1;
+}
+
+message FriendAccount {
+  optional int64 id = 1;
+  optional int64 lastSeen = 2;
+  optional string name = 3;
+}
+
+message Friend {
+  optional FriendAccount account = 1;
+}
+
+message GetFriendsResponse {
+  repeated Friend friends = 1;
 }

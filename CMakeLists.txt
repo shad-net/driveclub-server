@@ -7,7 +7,7 @@ project(driveclubsrv VERSION 1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 6.10 REQUIRED COMPONENTS Core Network)
+find_package(Qt6 6.10 REQUIRED COMPONENTS Core Network Sql)
 
 # ---- protobuf ------------------------------------------------------------------------------
 # protobuf v21.12 is a git submodule in externals/ (built in-tree, like shadNet's externals); it
@@ -49,7 +49,10 @@ target_include_directories(egs_proto PUBLIC
 target_link_libraries(egs_proto PUBLIC libprotobuf)
 
 add_executable(driveclubsrv
+    src/admin_service.cpp src/admin_service.h
+    src/auth.cpp src/auth.h
     src/config.cpp src/config.h
+    src/database.cpp src/database.h
     src/egs.cpp src/egs.h
     src/file_log.cpp src/file_log.h
     src/handler.cpp src/handler.h
@@ -57,9 +60,11 @@ add_executable(driveclubsrv
     src/main.cpp
     src/otg.cpp src/otg.h
     src/proto_dump.cpp src/proto_dump.h
+    src/request_log.cpp src/request_log.h
+    src/shadnet_verifier.cpp src/shadnet_verifier.h
     src/trace.cpp src/trace.h
 )
-target_link_libraries(driveclubsrv PRIVATE Qt6::Core Qt6::Network egs_proto)
+target_link_libraries(driveclubsrv PRIVATE Qt6::Core Qt6::Network Qt6::Sql egs_proto)
 # moc only for the server itself, not for the protobuf targets in externals/.
 set_target_properties(driveclubsrv PROPERTIES AUTOMOC ON)
 
@@ -87,3 +92,33 @@ if(WIN32)
 endif()
 
 install(TARGETS driveclubsrv RUNTIME DESTINATION bin)
+
+# driveclub-admin: Qt Widgets client for the admin API.
+option(DRIVECLUB_BUILD_ADMIN "Build the driveclub-admin GUI (needs Qt Widgets)" ON)
+if(DRIVECLUB_BUILD_ADMIN)
+    find_package(Qt6 6.10 QUIET COMPONENTS Widgets)
+    if(Qt6Widgets_FOUND)
+        add_executable(driveclub-admin WIN32 MACOSX_BUNDLE
+            admin/api_client.cpp admin/api_client.h
+            admin/main.cpp
+            admin/main_window.cpp admin/main_window.h
+        )
+        target_link_libraries(driveclub-admin PRIVATE Qt6::Widgets Qt6::Network)
+        set_target_properties(driveclub-admin PROPERTIES AUTOMOC ON)
+        if(MSVC)
+            target_compile_options(driveclub-admin PRIVATE /W4 /permissive-)
+        else()
+            target_compile_options(driveclub-admin PRIVATE -Wall -Wextra)
+        endif()
+        if(WIN32 AND GAME_SERVER_DEPLOY_QT AND WINDEPLOYQT_EXECUTABLE)
+            add_custom_command(TARGET driveclub-admin POST_BUILD
+                COMMAND "${WINDEPLOYQT_EXECUTABLE}" --no-translations --no-system-d3d-compiler --no-opengl-sw
+                        "$<TARGET_FILE:driveclub-admin>"
+                COMMENT "Deploying Qt next to driveclub-admin.exe"
+                VERBATIM)
+        endif()
+        install(TARGETS driveclub-admin RUNTIME DESTINATION bin BUNDLE DESTINATION .)
+    else()
+        message(STATUS "Qt Widgets not found: driveclub-admin will not be built")
+    endif()
+endif()

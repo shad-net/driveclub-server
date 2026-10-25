@@ -3,6 +3,10 @@
 
 #include "otg.h"
 
+#include "auth.h"
+#include "database.h"
+
+#include <QDateTime>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -10,7 +14,11 @@
 #include <QLoggingCategory>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QRegularExpression>
 #include <QUuid>
+
+#include <algorithm>
+#include <limits>
 
 namespace {
 
@@ -21,9 +29,17 @@ OtgConfig& config() {
     return c;
 }
 
+struct Token {
+    QString name;    // shadNet online id when verified, else what the request said
+    QString account; // shadNet account id, empty when not verified
+    qint64 created = 0;
+    qint64 lastUsed = 0;
+    int requests = 0;
+};
+
 struct Tokens {
     QMutex mutex;
-    QHash<QString, QString> nameByToken;
+    QHash<QString, Token> byToken;
 };
 
 Tokens& tokens() {
@@ -36,8 +52,10 @@ QString baseUrl(const HttpRequest& request) {
         return config().baseUrl;
     }
     const QByteArray host = request.headers.value("host");
-    return QStringLiteral("http://") +
-           (host.isEmpty() ? QStringLiteral("127.0.0.1:8080") : QString::fromLatin1(host));
+    if (!host.isEmpty()) {
+        return QStringLiteral("http://") + QString::fromLatin1(host);
+    }
+    return QStringLiteral("http://127.0.0.1:%1").arg(config().listenPort);
 }
 
 HttpResponse json(const QJsonDocument& doc, int status = 200) {
@@ -48,19 +66,177 @@ HttpResponse json(const QJsonDocument& doc, int status = 200) {
     return r;
 }
 
-HttpResponse login(const HttpRequest& request, const QString& who) {
+HttpResponse login(const HttpRequest& request, const QString& who, const AuthResult& auth) {
     const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const bool verified = auth.outcome == AuthResult::Outcome::Verified;
+    Token t;
+    t.name = verified ? auth.onlineId : who;
+    t.account = verified ? auth.accountId : QString();
+    t.created = QDateTime::currentMSecsSinceEpoch();
+    t.lastUsed = t.created;
     {
         QMutexLocker lock(&tokens().mutex);
-        tokens().nameByToken.insert(token, who);
+        tokens().byToken.insert(token, t);
     }
+    db::putToken({token, t.name, t.account, t.created, t.lastUsed, 0});
     const QString base = baseUrl(request);
-    qCInfo(lcOtg).noquote() << "OTG login" << who << "-> token" << token << "gateway" << base;
+    qCInfo(lcOtg).noquote() << "OTG login" << t.name
+                            << (verified ? "(shadNet verified)" : "(not verified)") << "-> token"
+                            << token << "gateway" << base;
     return json(QJsonDocument(QJsonObject{
         {QStringLiteral("token"), token},
         {QStringLiteral("config"), QJsonObject{{QStringLiteral("gateway"), base}}},
         {QStringLiteral("zone"), config().zone},
     }));
+}
+
+QString tokenOwner(const HttpRequest& request) {
+    QByteArray value = request.headers.value("authorization");
+    if (!value.startsWith("Bearer ")) {
+        return {};
+    }
+    const QString token = QString::fromLatin1(value.mid(7)).trimmed();
+    QMutexLocker lock(&tokens().mutex);
+    auto it = tokens().byToken.find(token);
+    if (it == tokens().byToken.end()) {
+        return {};
+    }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const bool save = now - it->lastUsed >= 10000;
+    it->lastUsed = now;
+    ++it->requests;
+    if (save) {
+        db::touchToken(token, it->lastUsed, it->requests);
+    }
+    return it->name;
+}
+
+// Leaderboards
+
+using Entry = db::Score;
+
+QJsonValue scoreJson(quint64 score) {
+    if (score <= quint64(std::numeric_limits<qint64>::max())) {
+        return QJsonValue(qint64(score));
+    }
+    return QJsonValue(double(score));
+}
+
+QJsonObject entryJson(const Entry& e, qsizetype position) {
+    QJsonObject o{
+        // 1-based rank on the whole board. The score-board row parser reads it first (0x5D81B9);
+        // without it every row has position 0.
+        {QStringLiteral("position"), qint64(position)},
+        // Scores are 64-bit (times are sent as 0x0FFFFFFFFFFFFFFF - ms), beyond a double's 53
+        // bits: write them as exact integers.
+        {QStringLiteral("score"), scoreJson(e.score)},
+        {QStringLiteral("entrant"), QJsonObject{{QStringLiteral("id"), e.entrant}}},
+    };
+    const bool empty = e.attachment.isEmpty() ||
+                       (e.attachment.size() == 1 && e.attachment.first().toString().isEmpty());
+    if (!empty) {
+        o.insert(QStringLiteral("attachment"), e.attachment);
+    }
+    return o;
+}
+
+QString boardName(QString resource) {
+    if (resource.endsWith(QLatin1String("/~leaderboard"))) {
+        resource.chop(13);
+    }
+    if (resource.startsWith(QLatin1String("scores/"))) {
+        resource.remove(0, 7);
+    }
+    return resource;
+}
+
+HttpResponse readBoard(const HttpRequest& request, const QString& name) {
+    const QString method = request.query.queryItemValue(QStringLiteral("_method"));
+    if (method.isEmpty()) {
+        const qsizetype size = db::boardSize(name);
+        qCInfo(lcOtg).noquote() << "leaderboard" << name << "size ->" << size;
+        return json(QJsonDocument(QJsonObject{{QStringLiteral("size"), qint64(size)}}));
+    }
+    const int count =
+        std::clamp(request.query.queryItemValue(QStringLiteral("count")).toInt(), 0, 500);
+    const QList<Entry> list = db::boardScores(name);
+    QJsonArray out;
+    QByteArray nextToken;
+
+    if (method == QLatin1String("select")) {
+        const QStringList wanted =
+            request.query.queryItemValue(QStringLiteral("entrants")).split(',', Qt::SkipEmptyParts);
+        for (qsizetype i = 0; i < list.size(); ++i) {
+            if (wanted.contains(list.at(i).entrant)) {
+                out.append(entryJson(list.at(i), i + 1));
+            }
+        }
+    } else if (method == QLatin1String("nearby")) {
+        const QString who = request.query.queryItemValue(QStringLiteral("entrant"));
+        const int n = count > 0 ? count : 10;
+        qsizetype at = -1;
+        for (qsizetype i = 0; i < list.size(); ++i) {
+            if (list.at(i).entrant == who) {
+                at = i;
+                break;
+            }
+        }
+        if (at >= 0) {
+            const qsizetype from = std::max<qsizetype>(0, at - n / 2);
+            for (qsizetype i = from; i < list.size() && i < from + n; ++i) {
+                out.append(entryJson(list.at(i), i + 1));
+            }
+        }
+    } else {
+        // page (default): count entries from offset <from>
+        const int n = count > 0 ? count : 50;
+        const qsizetype from =
+            std::max(0, request.query.queryItemValue(QStringLiteral("from")).toInt());
+        for (qsizetype i = from; i < list.size() && i < from + n; ++i) {
+            out.append(entryJson(list.at(i), i + 1));
+        }
+        if (from + n < list.size()) {
+            nextToken = QByteArray::number(from + n);
+        }
+    }
+
+    qCInfo(lcOtg).noquote() << "leaderboard" << name << method << "->" << out.size() << "of"
+                            << list.size() << "entries";
+    HttpResponse r = json(QJsonDocument(out));
+    r.headers.append(qMakePair(QByteArray("X-Count"), QByteArray::number(list.size())));
+    if (!nextToken.isEmpty()) {
+        r.headers.append(qMakePair(QByteArray("X-Next-Token"), nextToken));
+    }
+    return r;
+}
+
+HttpResponse writeBoard(const HttpRequest& request, const QString& name) {
+    const QJsonDocument doc = QJsonDocument::fromJson(request.body);
+    const QJsonArray items = doc.isArray() ? doc.array() : QJsonArray{doc.object()};
+    for (const QJsonValue& v : items) {
+        const QJsonObject o = v.toObject();
+        Entry e;
+        e.board = name;
+        e.entrant = o.value(QStringLiteral("entrant")).isObject()
+                        ? o.value(QStringLiteral("entrant")).toObject().value("id").toString()
+                        : o.value(QStringLiteral("entrant")).toVariant().toString();
+        // Qt 6 keeps integers up to 2^63 exact; the game's time scores are about 2^60.
+        e.score = o.value(QStringLiteral("score")).toVariant().toULongLong();
+        e.attachment = o.value(QStringLiteral("attachment")).toArray();
+        e.updated = QDateTime::currentMSecsSinceEpoch();
+        if (e.entrant.isEmpty()) {
+            continue;
+        }
+        const auto old = db::score(name, e.entrant);
+        const bool better = !old || e.score > old->score;
+        if (better) {
+            db::putScore(e);
+        }
+        qCInfo(lcOtg).noquote() << "score" << name << "entrant" << e.entrant << "score" << e.score
+                                << (better ? QStringLiteral("(stored)")
+                                           : QStringLiteral("(kept better %1)").arg(old->score));
+    }
+    return json(QJsonDocument(QJsonObject{{QStringLiteral("is_success"), true}}));
 }
 
 } // namespace
@@ -81,15 +257,133 @@ bool handleOtg(const HttpRequest& request, const QString& endpoint,
         return true;
     }
     if (endpoint == QLatin1String("login/driveclub")) {
-        // provider=psn&code=<NpAuth authorization code>. Not checked against shadNet yet.
         const QString code = request.query.queryItemValue(QStringLiteral("code"));
-        respond(
-            login(request, code.isEmpty() ? QStringLiteral("psn") : QStringLiteral("psn code")));
+        verifyCode(QStringLiteral("OTG"), code, [request, respond](const AuthResult& auth) {
+            if (auth.outcome == AuthResult::Outcome::Denied) {
+                qCWarning(lcOtg).noquote() << "OTG login denied:" << auth.message;
+                respond(json(QJsonDocument(QJsonObject{{QStringLiteral("error"), auth.message}}),
+                             auth.unavailable ? 503 : 401));
+                return;
+            }
+            respond(login(request, QStringLiteral("psn"), auth));
+        });
         return true;
     }
     if (endpoint == QLatin1String("xlogin/driveclub")) {
-        respond(login(request, request.query.queryItemValue(QStringLiteral("user"))));
+        if (!authConfig().shadnetUrl.isEmpty() && !authConfig().allowUnverified) {
+            qCWarning(lcOtg) << "fake OTG login refused (shadnet.allow_unverified is off)";
+            respond(json(QJsonDocument(QJsonObject{
+                             {QStringLiteral("error"), QStringLiteral("fake login not allowed")}}),
+                         401));
+            return true;
+        }
+        respond(login(request, request.query.queryItemValue(QStringLiteral("user")), {}));
         return true;
     }
-    return false;
+
+    static const QRegularExpression service(QStringLiteral("^([^/]+)/([^/]+)/(v\\d+)/(.+)$"));
+    const auto m = service.match(endpoint);
+    if (!m.hasMatch()) {
+        return false;
+    }
+    const QString resource = m.captured(4);
+    const QString board = boardName(resource);
+    if (tokenOwner(request).isEmpty()) {
+        qCWarning(lcOtg).noquote()
+            << request.method << resource << "with an unknown token (server restarted?)";
+    }
+    const bool isBoard = resource.endsWith(QLatin1String("/~leaderboard"));
+    if (request.method == "GET" && isBoard) {
+        respond(readBoard(request, board));
+        return true;
+    }
+    if (request.method == "POST" || request.method == "PUT") {
+        const QJsonDocument doc = QJsonDocument::fromJson(request.body);
+        const QJsonArray arr = doc.isArray() ? doc.array() : QJsonArray{};
+        if (!arr.isEmpty() && arr.first().toObject().contains(QStringLiteral("score"))) {
+            respond(writeBoard(request, board));
+            return true;
+        }
+    }
+    qCWarning(lcOtg).noquote() << "no OTG handler for" << request.method << resource << "(zone"
+                               << m.captured(1) << ", server" << m.captured(2) << ")";
+    HttpResponse r;
+    r.status = 404;
+    r.contentType = "application/json";
+    r.body = "{}";
+    respond(r);
+    return true;
+}
+
+QList<OtgTokenInfo> otgTokens() {
+    QMutexLocker lock(&tokens().mutex);
+    QList<OtgTokenInfo> out;
+    for (auto it = tokens().byToken.constBegin(); it != tokens().byToken.constEnd(); ++it) {
+        out.append({it.key(), it->name, it->account, it->created, it->lastUsed, it->requests});
+    }
+    return out;
+}
+
+bool otgDropToken(const QString& token) {
+    db::removeToken(token);
+    QMutexLocker lock(&tokens().mutex);
+    return tokens().byToken.remove(token) > 0;
+}
+
+void otgRestoreTokens() {
+    QMutexLocker lock(&tokens().mutex);
+    for (const db::Token& t : db::tokens()) {
+        tokens().byToken.insert(t.token, {t.name, t.account, t.created, t.lastUsed, t.requests});
+    }
+    if (!tokens().byToken.isEmpty()) {
+        qCInfo(lcOtg).noquote() << "restored" << tokens().byToken.size() << "OTG tokens";
+    }
+}
+
+QJsonArray otgBoardList() {
+    QJsonArray out;
+    for (const db::BoardInfo& b : db::boards()) {
+        out.append(QJsonObject{
+            {QStringLiteral("name"), b.name},
+            {QStringLiteral("entries"), qint64(b.entries)},
+            {QStringLiteral("best"), QString::number(b.best)},
+            {QStringLiteral("updated"), double(b.updated)},
+        });
+    }
+    return out;
+}
+
+std::optional<QJsonArray> otgBoardEntries(const QString& name) {
+    const QList<Entry> list = db::boardScores(name);
+    if (list.isEmpty()) {
+        return std::nullopt;
+    }
+    QJsonArray out;
+    int rank = 0;
+    for (const Entry& e : list) {
+        out.append(QJsonObject{
+            {QStringLiteral("rank"), ++rank},
+            {QStringLiteral("entrant"), e.entrant},
+            {QStringLiteral("score"), QString::number(e.score)},
+            {QStringLiteral("attachment"), e.attachment},
+            {QStringLiteral("updated"), double(e.updated)},
+        });
+    }
+    return out;
+}
+
+bool otgRemoveEntry(const QString& board, const QString& entrant) {
+    return db::removeScore(board, entrant);
+}
+
+bool otgSetEntry(const QString& board, const QString& entrant, quint64 score,
+                 const QJsonArray& attachment) {
+    if (board.isEmpty() || entrant.isEmpty()) {
+        return false;
+    }
+    return db::putScore({board, entrant, score, attachment, QDateTime::currentMSecsSinceEpoch()});
+}
+
+bool otgClearBoard(const QString& board) {
+    return db::clearBoard(board);
 }

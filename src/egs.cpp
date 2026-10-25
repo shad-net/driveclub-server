@@ -3,6 +3,8 @@
 
 #include "egs.h"
 
+#include "auth.h"
+#include "database.h"
 #include "egs.pb.h"
 
 #include <google/protobuf/descriptor.pb.h>
@@ -42,7 +44,12 @@ struct Session {
     QByteArray key;
     qint32 accountId = 0;
     QString name;
+    QString shadnetAccount; // empty when the login was not verified with shadNet
+    QString clientVersion;
+    bool psPlus = false;
+    qint64 created = 0;
     qint64 lastSeen = 0;
+    int requests = 0;
 };
 
 struct Sessions {
@@ -55,6 +62,17 @@ Sessions& sessions() {
     return s;
 }
 
+// Players
+void rememberPlayer(qint64 accountId, const QString& name, bool loggedIn,
+                    const QString& shadnetAccount = {}) {
+    db::Player p;
+    p.accountId = accountId;
+    p.name = name;
+    p.loggedIn = loggedIn;
+    p.shadnetAccount = shadnetAccount;
+    db::putPlayer(p);
+}
+
 qint32 accountIdFor(const QString& name) {
     const QByteArray h = QCryptographicHash::hash(name.toUtf8(), QCryptographicHash::Sha1);
     const quint32 v =
@@ -62,6 +80,7 @@ qint32 accountIdFor(const QString& name) {
     return static_cast<qint32>(v & 0x7fffffff) | 1;
 }
 
+// protobuf returns std::string in older releases and std::string_view in newer ones.
 QString qs(std::string_view s) {
     return QString::fromUtf8(s.data(), static_cast<qsizetype>(s.size()));
 }
@@ -73,6 +92,7 @@ struct Context {
     QByteArray sessionKey;    // the session this request was signed with, empty before login
     QByteArray newSessionKey; // set by a handler: sent as X-SessionKey, becomes the signing key
     int status = 200;
+    AuthResult auth; // login endpoints: the shadNet check of the authCode
 };
 
 struct Endpoint {
@@ -111,7 +131,8 @@ Endpoint endpoint(const char* service, const char* method, bool secure, bool lis
 std::string endpointList();
 
 void login(Context& ctx, const OAuthLoginRequest& req, OAuthLoginResponse& resp) {
-    QString name = qs(req.name());
+    const bool verified = ctx.auth.outcome == AuthResult::Outcome::Verified;
+    QString name = verified ? ctx.auth.onlineId : qs(req.name());
     if (name.isEmpty()) {
         name = QStringLiteral("player");
     }
@@ -119,22 +140,35 @@ void login(Context& ctx, const OAuthLoginRequest& req, OAuthLoginResponse& resp)
     s.key = QUuid::createUuid().toByteArray(QUuid::WithoutBraces);
     s.name = name;
     s.accountId = accountIdFor(name);
-    s.lastSeen = QDateTime::currentMSecsSinceEpoch();
+    s.shadnetAccount = verified ? ctx.auth.accountId : QString();
+    s.clientVersion = qs(req.clientversion());
+    s.psPlus = req.psplus();
+    s.created = QDateTime::currentMSecsSinceEpoch();
+    s.lastSeen = s.created;
     {
         QMutexLocker lock(&sessions().mutex);
-        // One session per player: drop the old key.
         for (auto it = sessions().byKey.begin(); it != sessions().byKey.end();) {
-            it = it->name == name ? sessions().byKey.erase(it) : std::next(it);
+            if (it->name == name) {
+                db::removeSession(it->key);
+                it = sessions().byKey.erase(it);
+            } else {
+                ++it;
+            }
         }
         sessions().byKey.insert(s.key, s);
     }
-    qCInfo(lcEgs).noquote() << QStringLiteral(
-                                   "login %1 (client %2, %3) -> accountId %4, session %5")
-                                   .arg(name, qs(req.clientversion()),
-                                        req.psplus() ? QStringLiteral("PS Plus")
-                                                     : QStringLiteral("no PS Plus"))
-                                   .arg(s.accountId)
-                                   .arg(QString::fromLatin1(s.key));
+    qCInfo(lcEgs).noquote()
+        << QStringLiteral("login %1 (%2, client %3, %4) -> accountId %5, session %6")
+               .arg(name,
+                    verified ? QStringLiteral("shadNet verified") : QStringLiteral("not verified"),
+                    qs(req.clientversion()),
+                    req.psplus() ? QStringLiteral("PS Plus") : QStringLiteral("no PS Plus"))
+               .arg(s.accountId)
+               .arg(QString::fromLatin1(s.key));
+
+    rememberPlayer(s.accountId, name, true, s.shadnetAccount);
+    db::putSession({s.key, s.accountId, s.name, s.shadnetAccount, s.clientVersion, s.psPlus,
+                    s.created, s.lastSeen, s.requests});
 
     SessionKey* key = resp.mutable_sessionkey();
     key->set_id(s.key.toStdString());
@@ -143,8 +177,64 @@ void login(Context& ctx, const OAuthLoginRequest& req, OAuthLoginResponse& resp)
     ctx.newSessionKey = s.key;
 }
 
+void minimalProfiles(Context&, const GetMinimalProfilesRequest& req,
+                     GetMinimalProfilesResponse& resp) {
+    QStringList names;
+    for (const qint64 id : req.accounts()) {
+        MinimalProfile* p = resp.add_profiles();
+        p->set_accountid(id);
+        const QString name = egsPlayerName(id);
+        p->set_name(name.toStdString());
+        names << QStringLiteral("%1=%2").arg(id).arg(name);
+    }
+    qCInfo(lcEgs).noquote() << "profiles for" << req.accounts_size()
+                            << "accounts:" << names.join(QStringLiteral(", "));
+}
+
+void aggregatedProfiles(Context&, const GetAggregatedProfilesRequest& req,
+                        GetAggregatedProfilesResponse& resp) {
+    QStringList found;
+    for (const std::string& wanted : req.accountnames()) {
+        const QString name = qs(wanted).trimmed();
+        if (name.isEmpty()) {
+            continue;
+        }
+        const auto knownPlayer = db::playerByName(name);
+        qint64 id = knownPlayer ? knownPlayer->accountId : 0;
+        const bool known = id != 0;
+        if (!known) {
+            id = accountIdFor(name);
+        }
+        AccountRef* a = resp.add_profiles()->mutable_account();
+        a->set_id(id);
+        a->set_name(name.toStdString());
+        found << QStringLiteral("%1=%2%3").arg(name).arg(id).arg(known ? QString()
+                                                                       : QStringLiteral(" (new)"));
+    }
+    qCInfo(lcEgs).noquote() << "aggregated profiles:" << found.join(QStringLiteral(", "));
+}
+
+void friends(Context& ctx, const GetFriendsRequest&, GetFriendsResponse& resp) {
+    const QString me = egsSessionName(ctx.sessionKey);
+    QStringList names;
+    for (const EgsPlayerInfo& p : egsPlayers()) {
+        if (p.name == me) {
+            continue;
+        }
+        FriendAccount* a = resp.add_friends()->mutable_account();
+        a->set_id(p.accountId);
+        a->set_lastseen(0);
+        a->set_name(p.name.toStdString());
+        names << p.name;
+    }
+    qCInfo(lcEgs).noquote() << "friends of" << (me.isEmpty() ? QStringLiteral("?") : me) << "->"
+                            << names.size()
+                            << (names.isEmpty() ? QString() : names.join(QStringLiteral(", ")));
+}
+
 const QList<Endpoint>& endpoints() {
     static const QList<Endpoint> list = {
+        // Registered by the game itself before it has a schema (0xA29400), so not listed.
         endpoint<Empty, gp::FileDescriptorProto>(
             "indexService", "getMessageDescriptors", false, false,
             [](Context&, const Empty&, gp::FileDescriptorProto& out) {
@@ -165,6 +255,12 @@ const QList<Endpoint>& endpoints() {
                                                         login),
         endpoint<OAuthLoginRequest, OAuthLoginResponse>("sessionService", "oauthRefresh", false,
                                                         true, login),
+        endpoint<GetMinimalProfilesRequest, GetMinimalProfilesResponse>(
+            "profileService", "getMinimalProfiles", false, true, minimalProfiles),
+        endpoint<GetAggregatedProfilesRequest, GetAggregatedProfilesResponse>(
+            "profileService", "getAggregatedProfiles", false, true, aggregatedProfiles),
+        endpoint<GetFriendsRequest, GetFriendsResponse>("friendsListService", "getFriends", false,
+                                                        true, friends),
     };
     return list;
 }
@@ -210,7 +306,6 @@ HttpResponse egsAnswer(const QString& method, const QByteArray& sessionKey, int 
     return r;
 }
 
-// "egs/binary/<service>/<method>" or "/egs/binary/..." -> {service, method}
 QStringList splitPath(QString path) {
     if (path.startsWith('/')) {
         path.remove(0, 1);
@@ -244,7 +339,13 @@ std::optional<QByteArray> egsFindSessionKey(const QString& method, const QByteAr
     QMutexLocker lock(&sessions().mutex);
     for (auto it = sessions().byKey.begin(); it != sessions().byKey.end(); ++it) {
         if (egsSignature(method, it.key(), body) == signature) {
-            it->lastSeen = QDateTime::currentMSecsSinceEpoch();
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            const bool save = now - it->lastSeen >= 10000; // at most every 10 s per session
+            it->lastSeen = now;
+            ++it->requests;
+            if (save) {
+                db::touchSession(it.key(), it->lastSeen, it->requests);
+            }
             return it.key();
         }
     }
@@ -259,7 +360,6 @@ QString egsSessionName(const QByteArray& sessionKey) {
 
 namespace {
 
-// Copies only what protobuf 2.4.1 (the game's version) knows.
 void copyEnum24(const gp::EnumDescriptorProto& in, gp::EnumDescriptorProto* out) {
     out->set_name(in.name());
     for (const auto& v : in.value()) {
@@ -296,6 +396,7 @@ void copyMessage24(const gp::DescriptorProto& in, gp::DescriptorProto* out) {
 
 QByteArray egsDescriptor() {
     static const QByteArray d = [] {
+        // Built from the compiled egs.proto, reduced to protobuf 2.4.1 descriptor fields.
         gp::FileDescriptorProto full;
         SvcEndpointDescriptorList::descriptor()->file()->CopyTo(&full);
         gp::FileDescriptorProto file;
@@ -356,35 +457,121 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
 
     const auto found =
         egsFindSessionKey(method, request.body, request.headers.value("x-request-signature"));
-    Context ctx{request, found.value_or(QByteArray()), {}, 200};
+    const QByteArray sessionKey = found.value_or(QByteArray());
 
     const Endpoint* e = findEndpoint(service, method);
     if (!e) {
         qCWarning(lcEgs).noquote() << "no EGS method" << service + '.' + method
                                    << "- add its messages to proto/egs.proto and an entry to "
                                       "endpoints() in src/egs.cpp";
-        HttpResponse r = egsAnswer(method, ctx.sessionKey, 404, {});
+        HttpResponse r = egsAnswer(method, sessionKey, 404, {});
         r.headers.append(
             qMakePair(QByteArray("X-Service-Error"), QByteArray("Service Method unavailable")));
         respond(r);
         return true;
     }
+    auto run = [e, service, method, sessionKey, respond](const HttpRequest& req,
+                                                         const AuthResult& auth) {
+        Context ctx{req, sessionKey, {}, 200, auth};
+        const std::string out = e->run(ctx, req.body);
+        const QByteArray body(out.data(), static_cast<qsizetype>(out.size()));
+        const QByteArray signKey = ctx.newSessionKey.isEmpty() ? ctx.sessionKey : ctx.newSessionKey;
+        HttpResponse r = egsAnswer(method, signKey, ctx.status, body);
+        if (!ctx.newSessionKey.isEmpty()) {
+            r.headers.append(qMakePair(QByteArray("X-SessionKey"), ctx.newSessionKey));
+        }
+        QString who;
+        if (!ctx.sessionKey.isEmpty()) {
+            who = QStringLiteral(" (session of %1)").arg(egsSessionName(ctx.sessionKey));
+        }
+        qCInfo(lcEgs).noquote() << QStringLiteral("%1.%2 -> %3, %4 bytes%5")
+                                       .arg(service, method, qs(e->response->name()))
+                                       .arg(body.size())
+                                       .arg(who);
+        respond(r);
+    };
 
-    const std::string out = e->run(ctx, request.body);
-    const QByteArray body(out.data(), static_cast<qsizetype>(out.size()));
-    const QByteArray signKey = ctx.newSessionKey.isEmpty() ? ctx.sessionKey : ctx.newSessionKey;
-    HttpResponse r = egsAnswer(method, signKey, ctx.status, body);
-    if (!ctx.newSessionKey.isEmpty()) {
-        r.headers.append(qMakePair(QByteArray("X-SessionKey"), ctx.newSessionKey));
+    if (e->request != OAuthLoginRequest::descriptor()) {
+        run(request, AuthResult{});
+        return true;
     }
-    QString who;
-    if (!ctx.sessionKey.isEmpty()) {
-        who = QStringLiteral(" (session of %1)").arg(egsSessionName(ctx.sessionKey));
-    }
-    qCInfo(lcEgs).noquote() << QStringLiteral("%1.%2 -> %3, %4 bytes%5")
-                                   .arg(service, method, qs(e->response->name()))
-                                   .arg(body.size())
-                                   .arg(who);
-    respond(r);
+
+    OAuthLoginRequest login;
+    login.ParseFromArray(request.body.constData(), static_cast<int>(request.body.size()));
+    verifyCode(
+        QStringLiteral("EGS"), qs(login.authcode()),
+        [run, request, method, sessionKey, respond](const AuthResult& auth) {
+            if (auth.outcome != AuthResult::Outcome::Denied) {
+                run(request, auth);
+                return;
+            }
+            StatusResult result;
+            result.set_retryhint(auth.unavailable ? 30 : 300);
+            const std::string out = result.SerializeAsString();
+            HttpResponse r = egsAnswer(method, sessionKey, auth.unavailable ? 503 : 500,
+                                       QByteArray(out.data(), qsizetype(out.size())));
+            r.headers.append(qMakePair(
+                QByteArray("X-Service-Error"),
+                QByteArray(auth.unavailable ? "Service unavailable" : "INVALID Oauth Token")));
+            qCWarning(lcEgs).noquote() << method << "denied:" << auth.message;
+            respond(r);
+        });
     return true;
+}
+
+QList<EgsPlayerInfo> egsPlayers() {
+    QList<EgsPlayerInfo> out;
+    for (const db::Player& p : db::players()) {
+        out.append({p.accountId, p.name, p.loggedIn});
+    }
+    return out;
+}
+
+void egsSetPlayerName(qint64 accountId, const QString& name) {
+    if (accountId != 0 && !name.trimmed().isEmpty()) {
+        rememberPlayer(accountId, name.trimmed(), false);
+    }
+}
+
+QString egsPlayerName(qint64 accountId) {
+    if (const auto p = db::player(accountId)) {
+        return p->name;
+    }
+    return QStringLiteral("Driver %1").arg(accountId);
+}
+
+void egsRestoreSessions() {
+    QMutexLocker lock(&sessions().mutex);
+    for (const db::Session& d : db::sessions()) {
+        Session s;
+        s.key = d.key;
+        s.accountId = d.accountId;
+        s.name = d.name;
+        s.shadnetAccount = d.shadnetAccount;
+        s.clientVersion = d.clientVersion;
+        s.psPlus = d.psPlus;
+        s.created = d.created;
+        s.lastSeen = d.lastSeen;
+        s.requests = d.requests;
+        sessions().byKey.insert(s.key, s);
+    }
+    if (!sessions().byKey.isEmpty()) {
+        qCInfo(lcEgs).noquote() << "restored" << sessions().byKey.size() << "EGS sessions";
+    }
+}
+
+QList<EgsSessionInfo> egsSessions() {
+    QMutexLocker lock(&sessions().mutex);
+    QList<EgsSessionInfo> out;
+    for (const Session& s : sessions().byKey) {
+        out.append({QString::fromLatin1(s.key), s.name, s.accountId, s.shadnetAccount,
+                    s.clientVersion, s.psPlus, s.created, s.lastSeen, s.requests});
+    }
+    return out;
+}
+
+bool egsDropSession(const QString& key) {
+    db::removeSession(key.toLatin1());
+    QMutexLocker lock(&sessions().mutex);
+    return sessions().byKey.remove(key.toLatin1()) > 0;
 }

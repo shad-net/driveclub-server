@@ -69,7 +69,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir dist
-          cp build/driveclubsrv README.md dist/
+          cp build/driveclubsrv build/driveclub-admin README.md dist/
 
       - name: Collect (Windows)
         if: runner.os == 'Windows'

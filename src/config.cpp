@@ -5,6 +5,8 @@
 
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRandomGenerator>
+#include <QStringList>
 
 namespace {
 
@@ -81,6 +83,21 @@ std::optional<Config> loadConfig(const QByteArray& json, QString* error) {
         c.traceBodyBytes = bytes;
     }
 
+    const QJsonObject database = root.value("database").toObject();
+    if (database.contains("file")) {
+        c.databaseFile = database.value("file").toString();
+        if (c.databaseFile.isEmpty()) {
+            return failed(error, QStringLiteral("database.file must not be empty"));
+        }
+    }
+    if (database.contains("session_days")) {
+        qint64 days = 0;
+        if (!readInt(database.value("session_days"), 1, 3650, &days)) {
+            return failed(error, QStringLiteral("database.session_days must be 1..3650"));
+        }
+        c.sessionDays = static_cast<int>(days);
+    }
+
     const QJsonObject egs = root.value("egs").toObject();
     if (egs.contains("server_identifier")) {
         c.egs.serverIdentifier = egs.value("server_identifier").toString();
@@ -97,22 +114,98 @@ std::optional<Config> loadConfig(const QByteArray& json, QString* error) {
     while (c.otg.baseUrl.endsWith('/')) {
         c.otg.baseUrl.chop(1);
     }
+    if (!c.otg.baseUrl.isEmpty() && !c.otg.baseUrl.startsWith(QLatin1String("http://")) &&
+        !c.otg.baseUrl.startsWith(QLatin1String("https://"))) {
+        return failed(error, QStringLiteral("otg.base_url must start with http:// or https://"));
+    }
+    c.otg.listenPort = c.port;
     if (otg.contains("domain_id")) {
         c.otg.domainId = otg.value("domain_id").toString();
     }
     if (otg.contains("zone")) {
         c.otg.zone = otg.value("zone").toString();
     }
+
+    const QJsonObject shadnet = root.value("shadnet").toObject();
+    c.auth.shadnetUrl = shadnet.value("url").toString();
+    while (c.auth.shadnetUrl.endsWith('/')) {
+        c.auth.shadnetUrl.chop(1);
+    }
+    if (!c.auth.shadnetUrl.isEmpty() && !c.auth.shadnetUrl.startsWith(QLatin1String("http://")) &&
+        !c.auth.shadnetUrl.startsWith(QLatin1String("https://"))) {
+        return failed(error, QStringLiteral("shadnet.url must start with http:// or https://"));
+    }
+    c.auth.clientId = shadnet.value("client_id").toString();
+    c.auth.allowUnverified = shadnet.value("allow_unverified").toBool(false);
+
+    const QJsonObject admin = root.value("admin").toObject();
+    if (admin.contains("address") &&
+        !c.adminAddress.setAddress(admin.value("address").toString())) {
+        return failed(error, QStringLiteral("admin.address is not an IP address"));
+    }
+    if (admin.contains("port")) {
+        qint64 port = 0;
+        if (!readInt(admin.value("port"), 1, 65535, &port)) {
+            return failed(error, QStringLiteral("admin.port must be 1..65535"));
+        }
+        c.adminPort = static_cast<quint16>(port);
+    }
+    c.adminKey = admin.value("key").toString();
+    if (!c.adminKey.isEmpty() && c.adminKey.size() < 8) {
+        return failed(error, QStringLiteral("admin.key must be at least 8 characters"));
+    }
     return c;
 }
 
 QByteArray defaultConfigJson() {
-    return QByteArrayLiteral(R"({
+    QByteArray key(16, Qt::Uninitialized);
+    QRandomGenerator::system()->fillRange(reinterpret_cast<quint32*>(key.data()), 4);
+    QByteArray json = QByteArrayLiteral(R"({
     "listen": { "address": "0.0.0.0", "port": 8080 },
     "base_path": "",
     "log": { "file": "server.log", "max_size_mb": 50, "trace": true, "trace_body_bytes": 65536 },
+    "database": { "file": "driveclub.db", "session_days": 30 },
     "egs": { "server_identifier": "dc-community", "version": "1" },
-    "otg": { "base_url": "", "domain_id": "driveclub", "zone": "eu" }
+    "otg": { "base_url": "", "domain_id": "driveclub", "zone": "eu" },
+    "shadnet": { "url": "http://127.0.0.1:31315",
+                 "client_id": "2a347f19-d4c4-492d-aadc-bc07ae7b8c15", "allow_unverified": false },
+    "admin": { "address": "127.0.0.1", "port": 8081, "key": "@KEY@" }
 }
 )");
+    return json.replace("@KEY@", key.toHex());
+}
+
+namespace {
+
+void addMissing(QJsonObject* target, const QJsonObject& defaults, const QString& prefix,
+                QStringList* added) {
+    for (auto it = defaults.constBegin(); it != defaults.constEnd(); ++it) {
+        const QString name = prefix.isEmpty() ? it.key() : prefix + '.' + it.key();
+        if (!target->contains(it.key())) {
+            target->insert(it.key(), it.value());
+            added->append(name);
+        } else if (it.value().isObject() && target->value(it.key()).isObject()) {
+            QJsonObject child = target->value(it.key()).toObject();
+            const qsizetype before = added->size();
+            addMissing(&child, it.value().toObject(), name, added);
+            if (added->size() != before) {
+                target->insert(it.key(), child);
+            }
+        }
+    }
+}
+
+} // namespace
+
+std::optional<QByteArray> mergeDefaultConfig(const QByteArray& json, QStringList* added) {
+    const QJsonDocument doc = QJsonDocument::fromJson(json);
+    if (!doc.isObject()) {
+        return std::nullopt; // loadConfig reports the parse error
+    }
+    QJsonObject root = doc.object();
+    addMissing(&root, QJsonDocument::fromJson(defaultConfigJson()).object(), QString(), added);
+    if (added->isEmpty()) {
+        return std::nullopt;
+    }
+    return QJsonDocument(root).toJson(QJsonDocument::Indented);
 }

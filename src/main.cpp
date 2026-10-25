@@ -1,20 +1,26 @@
 // SPDX-FileCopyrightText: Copyright 2026 Driveclub Custom Server Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "admin_service.h"
+#include "auth.h"
 #include "config.h"
+#include "database.h"
 #include "egs.h"
 #include "file_log.h"
 #include "handler.h"
 #include "http_server.h"
 #include "otg.h"
+#include "request_log.h"
 #include "trace.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QLoggingCategory>
+#include <QSaveFile>
 
 #include <cstdio>
 
@@ -34,6 +40,7 @@ int main(int argc, char* argv[]) {
         "%{time yyyy-MM-dd hh:mm:ss.zzz} [%{type}] %{if-category}%{category}: %{endif}%{message}"));
 
     const QString configPath = QStringLiteral("config.json");
+    QStringList startupNotes; // repeated into the log file once it is open
     if (!QFileInfo::exists(configPath)) {
         QFile file(configPath);
         if (!file.open(QIODevice::WriteOnly) || file.write(defaultConfigJson()) < 0) {
@@ -41,13 +48,30 @@ int main(int argc, char* argv[]) {
                 QStringLiteral("cannot create %1: %2").arg(configPath, file.errorString()));
         }
         qInfo("wrote default configuration to %s", qPrintable(configPath));
+        startupNotes << QStringLiteral("wrote default configuration to %1").arg(configPath);
     }
     QFile file(configPath);
     if (!file.open(QIODevice::ReadOnly)) {
         return fatal(QStringLiteral("cannot read %1: %2").arg(configPath, file.errorString()));
     }
+    QByteArray configJson = file.readAll();
+    file.close();
+    // Settings added in newer versions are written into an existing config.json.
+    QStringList added;
+    if (const auto merged = mergeDefaultConfig(configJson, &added)) {
+        QSaveFile out(configPath);
+        if (out.open(QIODevice::WriteOnly) && out.write(*merged) >= 0 && out.commit()) {
+            startupNotes << QStringLiteral("added new settings to %1: %2")
+                                .arg(configPath, added.join(QStringLiteral(", ")));
+            qInfo("%s", qPrintable(startupNotes.last()));
+        } else {
+            qWarning("cannot update %s (%s); using the new settings' defaults for this run",
+                     qPrintable(configPath), qPrintable(out.errorString()));
+        }
+        configJson = *merged;
+    }
     QString error;
-    auto config = loadConfig(file.readAll(), &error);
+    auto config = loadConfig(configJson, &error);
     if (!config) {
         return fatal(QStringLiteral("%1: %2").arg(configPath, error));
     }
@@ -60,11 +84,35 @@ int main(int argc, char* argv[]) {
         }
         qInfo("logging to %s (rewritten at %lld MB)", qPrintable(logPath),
               static_cast<long long>(config->logMaxBytes / (1024 * 1024)));
+        for (const QString& note : startupNotes) {
+            qInfo("%s", qPrintable(note));
+        }
     }
+
+    const QDir configDir(QFileInfo(configPath).absolutePath());
+    const QString dbPath = configDir.absoluteFilePath(config->databaseFile);
+    if (!db::open(dbPath, &error)) {
+        return fatal(QStringLiteral("cannot open database %1: %2").arg(dbPath, error));
+    }
+    qInfo("database %s", qPrintable(dbPath));
+    db::prune(config->sessionDays);
 
     setTraceOptions({config->trace, static_cast<qsizetype>(config->traceBodyBytes)});
     setEgsConfig(config->egs);
     setOtgConfig(config->otg);
+    qInfo("OTG base URL (auth, gateway): %s", config->otg.baseUrl.isEmpty()
+                                                  ? "http:// + the Host header of each request"
+                                                  : qPrintable(config->otg.baseUrl));
+    egsRestoreSessions();
+    otgRestoreTokens();
+    setupAuth(config->auth);
+    if (config->auth.shadnetUrl.isEmpty()) {
+        qInfo("shadNet checks off (shadnet.url empty): logins are accepted as sent");
+    } else {
+        qInfo("verifying authorization codes with shadNet at %s as client %s%s",
+              qPrintable(config->auth.shadnetUrl), qPrintable(authConfig().clientId),
+              config->auth.allowUnverified ? " (unverified logins allowed)" : "");
+    }
     qInfo("EGS serverIdentifier \"%s\" (each OTG_Service_* TSS value must contain it)",
           qPrintable(config->egs.serverIdentifier));
 
@@ -77,6 +125,21 @@ int main(int argc, char* argv[]) {
         timer.start();
         auto respond = [reply, id, label, timer, request](HttpResponse response) {
             traceResponse(id, label, request, response, timer.elapsed());
+            RequestRecord record;
+            record.id = id;
+            record.time = QDateTime::currentMSecsSinceEpoch();
+            record.method = QString::fromLatin1(request.method);
+            record.path = request.path;
+            if (!request.query.isEmpty()) {
+                record.path += '?' + request.query.toString();
+            }
+            record.label = label;
+            record.peer = request.peer.toString();
+            record.status = response.status;
+            record.elapsedMs = timer.elapsed();
+            record.bytesIn = request.body.size();
+            record.bytesOut = response.body.size();
+            recordRequest(record);
             reply(std::move(response));
         };
         QString path = request.path;
@@ -104,5 +167,21 @@ int main(int argc, char* argv[]) {
           qPrintable(config->address.toString()), config->port,
           qPrintable(basePath.isEmpty() ? QStringLiteral("/") : basePath),
           config->trace ? "on" : "off");
+
+    AdminService admin(*config);
+    HttpServer adminServer([&admin](const HttpRequest& request, HttpServer::Responder respond) {
+        admin.handle(request, std::move(respond));
+    });
+    if (config->adminKey.isEmpty()) {
+        qInfo("admin API disabled: set admin.key in config.json to use driveclub-admin");
+    } else if (!adminServer.listen(config->adminAddress, config->adminPort, &error)) {
+        return fatal(QStringLiteral("cannot listen on %1:%2 for the admin API: %3")
+                         .arg(config->adminAddress.toString())
+                         .arg(config->adminPort)
+                         .arg(error));
+    } else {
+        qInfo("admin API on %s:%u (driveclub-admin, key: admin.key in config.json)",
+              qPrintable(config->adminAddress.toString()), config->adminPort);
+    }
     return app.exec();
 }

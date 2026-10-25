@@ -52,6 +52,9 @@ const QList<Rule>& rules() {
             {"^/messaging(/|$)", "EGS messaging"},
             // OTG hub, login and OTG domain services
             {"^/titles/driveclub/domains/?$", "OTG hub domains"},
+            {"^/[^/]+/[^/]+/v\\d+/.+/~leaderboard$", "OTG leaderboard"},
+            {"^/[^/]+/[^/]+/v\\d+/scores/", "OTG scores"},
+            {"^/[^/]+/[^/]+/v\\d+/", "OTG service"},
             {"^/titles/", "OTG hub"},
             {"^/xlogin/driveclub", "OTG login (fake)"},
             {"^/login/driveclub", "OTG login (psn)"},
@@ -171,7 +174,6 @@ void traceBody(quint64 id, const QByteArray& body, const QByteArray& contentType
     logLines(id, QStringLiteral("   | "), dumpBody(body, limit));
 }
 
-// "/egs/binary/<service>/<method>" -> {service, method}
 QStringList egsPathParts(const QString& path) {
     for (const QLatin1String prefix :
          {QLatin1String("/egs/binary/"), QLatin1String("/egs/direct/")}) {
