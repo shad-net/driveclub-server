@@ -124,11 +124,7 @@ QJsonValue scoreJson(quint64 score) {
 
 QJsonObject entryJson(const Entry& e, qsizetype position) {
     QJsonObject o{
-        // 1-based rank on the whole board. The score-board row parser reads it first (0x5D81B9);
-        // without it every row has position 0.
         {QStringLiteral("position"), qint64(position)},
-        // Scores are 64-bit (times are sent as 0x0FFFFFFFFFFFFFFF - ms), beyond a double's 53
-        // bits: write them as exact integers.
         {QStringLiteral("score"), scoreJson(e.score)},
         {QStringLiteral("entrant"), QJsonObject{{QStringLiteral("id"), e.entrant}}},
     };
@@ -188,7 +184,6 @@ HttpResponse readBoard(const HttpRequest& request, const QString& name) {
             }
         }
     } else {
-        // page (default): count entries from offset <from>
         const int n = count > 0 ? count : 50;
         const qsizetype from =
             std::max(0, request.query.queryItemValue(QStringLiteral("from")).toInt());
@@ -237,6 +232,60 @@ HttpResponse writeBoard(const HttpRequest& request, const QString& name) {
                                            : QStringLiteral("(kept better %1)").arg(old->score));
     }
     return json(QJsonDocument(QJsonObject{{QStringLiteral("is_success"), true}}));
+}
+
+// Counter gamestates
+
+HttpResponse gameStateJson(const db::GameState& g) {
+    return json(QJsonDocument(QJsonObject{
+        {QStringLiteral("version"), g.version},
+        {QStringLiteral("counts"), g.counts},
+    }));
+}
+
+HttpResponse handleGameState(const HttpRequest& request, const QString& resource) {
+    if (request.method == "GET") {
+        const auto g = db::gameState(resource);
+        if (!g) {
+            qCInfo(lcOtg).noquote()
+                << "gamestate" << resource << "-> none yet (404, game defaults)";
+            return json(QJsonDocument(QJsonObject{}), 404);
+        }
+        qCInfo(lcOtg).noquote() << "gamestate" << resource << "-> version" << g->version << "with"
+                                << g->counts.size() << "counters";
+        return gameStateJson(*g);
+    }
+    if (request.method != "POST" && request.method != "PUT") {
+        return json(QJsonDocument(QJsonObject{{QStringLiteral("error"), QStringLiteral("method")}}),
+                    405);
+    }
+    const QJsonObject body = QJsonDocument::fromJson(request.body).object();
+    db::GameState g = db::gameState(resource).value_or(db::GameState{resource, 0, {}, 0});
+    const qint64 parent = body.value(QStringLiteral("parent")).toInteger(-1);
+    if (parent != g.version) {
+        qCInfo(lcOtg).noquote() << "gamestate" << resource << "write based on version" << parent
+                                << "but stored is" << g.version << "(applied anyway)";
+    }
+    QStringList changes;
+    for (const QJsonValue& t : body.value(QStringLiteral("transactions")).toArray()) {
+        const QJsonObject deltas = t.toObject().value(QStringLiteral("deltas")).toObject();
+        for (auto it = deltas.constBegin(); it != deltas.constEnd(); ++it) {
+            const qint64 delta = it.value().toInteger();
+            const qint64 value = std::max<qint64>(0, g.counts.value(it.key()).toInteger() + delta);
+            g.counts.insert(it.key(), value);
+            changes << QStringLiteral("%1 %2%3 = %4")
+                           .arg(it.key(), delta >= 0 ? QStringLiteral("+") : QString())
+                           .arg(delta)
+                           .arg(value);
+        }
+    }
+    ++g.version;
+    g.updated = QDateTime::currentMSecsSinceEpoch();
+    db::putGameState(g);
+    qCInfo(lcOtg).noquote() << "gamestate" << resource << "-> version" << g.version << ":"
+                            << (changes.isEmpty() ? QStringLiteral("no changes")
+                                                  : changes.join(QStringLiteral(", ")));
+    return gameStateJson(g);
 }
 
 } // namespace
@@ -291,6 +340,10 @@ bool handleOtg(const HttpRequest& request, const QString& endpoint,
     if (tokenOwner(request).isEmpty()) {
         qCWarning(lcOtg).noquote()
             << request.method << resource << "with an unknown token (server restarted?)";
+    }
+    if (resource.endsWith(QLatin1String("/~gamestate"))) {
+        respond(handleGameState(request, resource.chopped(11)));
+        return true;
     }
     const bool isBoard = resource.endsWith(QLatin1String("/~leaderboard"));
     if (request.method == "GET" && isBoard) {
@@ -382,6 +435,23 @@ bool otgSetEntry(const QString& board, const QString& entrant, quint64 score,
         return false;
     }
     return db::putScore({board, entrant, score, attachment, QDateTime::currentMSecsSinceEpoch()});
+}
+
+QJsonArray otgGameStates() {
+    QJsonArray out;
+    for (const db::GameState& g : db::gameStates()) {
+        out.append(QJsonObject{
+            {QStringLiteral("resource"), g.resource},
+            {QStringLiteral("version"), g.version},
+            {QStringLiteral("counts"), g.counts},
+            {QStringLiteral("updated"), double(g.updated)},
+        });
+    }
+    return out;
+}
+
+bool otgRemoveGameState(const QString& resource) {
+    return db::removeGameState(resource);
 }
 
 bool otgClearBoard(const QString& board) {

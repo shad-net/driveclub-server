@@ -19,6 +19,10 @@
 //                                                attachment,
 //                                                name (optional display name)}
 //   GET    /api/players                          [{account_id, name, logged_in}] known names
+//   GET    /api/gamestates                       OTG counter gamestates [{resource, version,
+//                                                                                   counts}]
+//   DELETE /api/gamestates?resource=<r>          forget one (the game starts from its
+//                                                                                 defaults)
 //   DELETE /api/leaderboards/entries?board=<b>&entrant=<e>
 //   GET    /api/requests[?after=<id>]            recent game requests (newest last)
 class AdminService {

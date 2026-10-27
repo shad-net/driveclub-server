@@ -53,6 +53,7 @@ const QList<Rule>& rules() {
             // OTG hub, login and OTG domain services
             {"^/titles/driveclub/domains/?$", "OTG hub domains"},
             {"^/[^/]+/[^/]+/v\\d+/.+/~leaderboard$", "OTG leaderboard"},
+            {"^/[^/]+/[^/]+/v\\d+/.+/~gamestate$", "OTG gamestate"},
             {"^/[^/]+/[^/]+/v\\d+/scores/", "OTG scores"},
             {"^/[^/]+/[^/]+/v\\d+/", "OTG service"},
             {"^/titles/", "OTG hub"},

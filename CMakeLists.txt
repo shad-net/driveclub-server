@@ -9,12 +9,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Qt6 6.10 REQUIRED COMPONENTS Core Network Sql)
 
-# ---- protobuf ------------------------------------------------------------------------------
-# protobuf v21.12 is a git submodule in externals/ (built in-tree, like shadNet's externals); it
-# is the last release that does not need abseil. Clone with --recursive, or run
-# `git submodule update --init --recursive`. The game embeds protobuf 2.4.1, but the wire format is
-# unchanged since then; the schema sent to the game is reduced to 2.4.1 descriptor fields in
-# egs.cpp.
 if(MSVC)
     # Qt uses the DLL runtime (/MD, /MDd); protobuf must match.
     cmake_policy(SET CMP0091 NEW)

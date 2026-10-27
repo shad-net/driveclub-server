@@ -5,6 +5,7 @@
 
 #include <QDateTime>
 #include <QJsonDocument>
+#include <QJsonObject>
 #include <QLoggingCategory>
 #include <QMutex>
 #include <QMutexLocker>
@@ -61,6 +62,15 @@ const char* const Migrations[] = {
         created   INTEGER NOT NULL,
         last_used INTEGER NOT NULL,
         requests  INTEGER NOT NULL DEFAULT 0
+    );
+    )",
+    // 2: OTG counter gamestates (ChallengeTimers/V01/player/<id>/~gamestate and the like)
+    R"(
+    CREATE TABLE gamestates (
+        resource TEXT PRIMARY KEY,
+        version  INTEGER NOT NULL,
+        counts   TEXT NOT NULL DEFAULT '{}',
+        updated  INTEGER NOT NULL
     );
     )",
 };
@@ -460,6 +470,64 @@ QList<Token> tokens() {
         while (q.next()) {
             out.append({q.value(0).toString(), q.value(1).toString(), q.value(2).toString(),
                         q.value(3).toLongLong(), q.value(4).toLongLong(), q.value(5).toInt()});
+        }
+    }
+    return out;
+}
+
+// OTG counter gamestates
+
+std::optional<GameState> gameState(const QString& resource) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral(
+        "SELECT resource, version, counts, updated FROM gamestates WHERE resource = ?"));
+    q.addBindValue(text(resource));
+    if (run(q, "read gamestate") && q.next()) {
+        GameState g;
+        g.resource = q.value(0).toString();
+        g.version = q.value(1).toLongLong();
+        g.counts = QJsonDocument::fromJson(q.value(2).toString().toUtf8()).object();
+        g.updated = q.value(3).toLongLong();
+        return g;
+    }
+    return std::nullopt;
+}
+
+bool putGameState(const GameState& g) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("INSERT OR REPLACE INTO gamestates (resource, version, counts, "
+                             "updated) VALUES (?, ?, ?, ?)"));
+    q.addBindValue(text(g.resource));
+    q.addBindValue(g.version);
+    q.addBindValue(QString::fromUtf8(QJsonDocument(g.counts).toJson(QJsonDocument::Compact)));
+    q.addBindValue(g.updated ? g.updated : now());
+    return run(q, "save gamestate");
+}
+
+bool removeGameState(const QString& resource) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("DELETE FROM gamestates WHERE resource = ?"));
+    q.addBindValue(text(resource));
+    return run(q, "remove gamestate") && q.numRowsAffected() > 0;
+}
+
+QList<GameState> gameStates() {
+    QList<GameState> out;
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral(
+        "SELECT resource, version, counts, updated FROM gamestates ORDER BY resource"));
+    if (run(q, "list gamestates")) {
+        while (q.next()) {
+            GameState g;
+            g.resource = q.value(0).toString();
+            g.version = q.value(1).toLongLong();
+            g.counts = QJsonDocument::fromJson(q.value(2).toString().toUtf8()).object();
+            g.updated = q.value(3).toLongLong();
+            out.append(g);
         }
     }
     return out;

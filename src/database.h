@@ -4,6 +4,7 @@
 #pragma once
 
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QList>
 #include <QString>
 
@@ -85,5 +86,17 @@ void putToken(const Token& token);
 void touchToken(const QString& token, qint64 lastUsed, int requests);
 void removeToken(const QString& token);
 QList<Token> tokens();
+
+// OTG counter gamestates
+struct GameState {
+    QString resource;
+    qint64 version = 0;
+    QJsonObject counts; // name to integer
+    qint64 updated = 0;
+};
+std::optional<GameState> gameState(const QString& resource);
+bool putGameState(const GameState& state);
+bool removeGameState(const QString& resource);
+QList<GameState> gameStates();
 
 } // namespace db

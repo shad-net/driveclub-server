@@ -132,6 +132,20 @@ HttpResponse AdminService::route(const HttpRequest& request) {
             }
         }
     }
+    if (what == QLatin1String("gamestates") && parts.size() == 2) {
+        if (m == "GET") {
+            return json(200, otgGameStates());
+        }
+        if (m == "DELETE") {
+            const QString resource =
+                request.query.queryItemValue(QStringLiteral("resource"), QUrl::FullyDecoded);
+            if (!otgRemoveGameState(resource)) {
+                return error(404, QStringLiteral("no such gamestate"));
+            }
+            qCInfo(lcAdmin).noquote() << "removed gamestate" << resource;
+            return json(200, QJsonObject{{QStringLiteral("removed"), resource}});
+        }
+    }
     if (what == QLatin1String("players") && parts.size() == 2 && m == "GET") {
         QJsonArray out;
         for (const EgsPlayerInfo& p : egsPlayers()) {

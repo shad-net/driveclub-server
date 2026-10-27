@@ -16,7 +16,8 @@
 // 1. GET https://hub.services.otg.scee.com/titles/driveclub/domains
 // 2. GET <auth>/login/driveclub?provider=psn&code=<NpAuth code>
 // 3. Services under <gateway>/<zone>/<serverIdentifier>/v01/<resource>. Leaderboards
-//    (<board>/~leaderboard reads, score posts) are handled, other resources get 404 and a log line.
+//    (<board>/~leaderboard reads, score posts) nd counter gamestates (<...>/~gamestate) are
+//    handled, other resources get 404 and a log line.
 struct OtgConfig {
     QString baseUrl;
     quint16 listenPort = 8080; // listen.port, for requests without a Host header
@@ -42,6 +43,8 @@ QJsonArray otgBoardList();
 std::optional<QJsonArray> otgBoardEntries(const QString& name);
 bool otgRemoveEntry(const QString& board, const QString& entrant);
 bool otgClearBoard(const QString& board);
+QJsonArray otgGameStates();
+bool otgRemoveGameState(const QString& resource);
 bool otgSetEntry(const QString& board, const QString& entrant, quint64 score,
                  const QJsonArray& attachment);
 
