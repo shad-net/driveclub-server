@@ -10,8 +10,12 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLoggingCategory>
+#include <QMap>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QRegularExpression>
 #include <QStringList>
+#include <QTimer>
 
 #include <algorithm>
 
@@ -52,6 +56,7 @@ const QList<Rule>& rules() {
             {"^/messaging(/|$)", "EGS messaging"},
             // OTG hub, login and OTG domain services
             {"^/titles/driveclub/domains/?$", "OTG hub domains"},
+            {"^/ghosts/\\d+$", "ghost download"},
             {"^/[^/]+/[^/]+/v\\d+/.+/~leaderboard$", "OTG leaderboard"},
             {"^/[^/]+/[^/]+/v\\d+/.+/~gamestate$", "OTG gamestate"},
             {"^/[^/]+/[^/]+/v\\d+/scores/", "OTG scores"},
@@ -172,6 +177,14 @@ void traceBody(quint64 id, const QByteArray& body, const QByteArray& contentType
             logLines(id, QStringLiteral("   ~ "), fields.join('\n'));
         }
     }
+    constexpr qsizetype BinaryDumpLimit = 1024;
+    if (kind == QLatin1String("binary") && body.size() > BinaryDumpLimit) {
+        logLines(id, QStringLiteral("   | "), dumpBody(body.left(256), 0));
+        qCInfo(lcTrace).noquote() << QStringLiteral("#%1   | ... (%2 more bytes not shown)")
+                                         .arg(id)
+                                         .arg(body.size() - 256);
+        return;
+    }
     logLines(id, QStringLiteral("   | "), dumpBody(body, limit));
 }
 
@@ -235,8 +248,57 @@ QString dumpBody(const QByteArray& body, qsizetype limit) {
     return out;
 }
 
-quint64 traceRequest(const HttpRequest& request, const QString& label) {
-    const quint64 id = nextId.fetchAndAddRelaxed(1);
+quint64 traceNextId() {
+    return nextId.fetchAndAddRelaxed(1);
+}
+
+bool isPushPoll(const HttpRequest& request) {
+    return request.method == "GET" && (request.path == QLatin1String("/egs/messaging") ||
+                                       request.path == QLatin1String("/messaging"));
+}
+
+namespace {
+
+struct KeepaliveCounts {
+    QMutex mutex;
+    QMap<QString, int> byPeer;
+};
+
+KeepaliveCounts& keepaliveCounts() {
+    static KeepaliveCounts k;
+    return k;
+}
+
+void flushKeepalives() {
+    QMap<QString, int> counts;
+    {
+        QMutexLocker lock(&keepaliveCounts().mutex);
+        counts.swap(keepaliveCounts().byPeer);
+    }
+    for (auto it = counts.constBegin(); it != counts.constEnd(); ++it) {
+        qCInfo(lcTrace).noquote() << QStringLiteral(
+                                         "messaging: %1 keepalives to %2 in the last 60 s")
+                                         .arg(it.value())
+                                         .arg(it.key());
+    }
+}
+
+} // namespace
+
+void traceKeepalive(const HttpRequest& request) {
+    QMutexLocker lock(&keepaliveCounts().mutex);
+    ++keepaliveCounts().byPeer[request.peer.toString()];
+}
+
+void startKeepaliveSummaries() {
+    static QTimer timer;
+    timer.setInterval(60 * 1000);
+    QObject::connect(&timer, &QTimer::timeout, [] { flushKeepalives(); });
+    timer.start();
+}
+
+quint64 traceRequest(const HttpRequest& request, const QString& label, quint64 givenId) {
+    const quint64 id = givenId != 0 ? givenId : nextId.fetchAndAddRelaxed(1);
     const QString query = request.query.isEmpty() ? QString() : '?' + request.query.toString();
     const QString name = label.isEmpty() ? QStringLiteral("UNKNOWN endpoint") : label;
     qCInfo(lcTrace).noquote() << QStringLiteral("#%1 >>> %2 %3%4  [%5]  from %6")
@@ -301,7 +363,7 @@ void traceResponse(quint64 id, const QString& label, const HttpRequest& request,
                           .arg(name)
                           .arg(response.body.size())
                           .arg(elapsedMs);
-    if (response.status >= 400) {
+    if (response.status >= 400 && !response.expected) {
         qCWarning(lcTrace).noquote() << line;
     } else {
         qCInfo(lcTrace).noquote() << line;

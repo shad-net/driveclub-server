@@ -5,7 +5,7 @@ syntax = "proto2";
 
 message Empty {}
 
-// indexService
+// indexService 
 
 message SvcEndpointDescriptor {
   optional string service = 1;
@@ -147,4 +147,110 @@ message Friend {
 
 message GetFriendsResponse {
   repeated Friend friends = 1;
+}
+
+// systemService.getTimeInfo
+
+message GetTimeInfoResponse {
+  optional int64 timestamp = 1;  // server time, ms since 1970
+}
+
+// transactionService
+
+message TransactionRequest {
+  optional string currentTransactionId = 1;
+}
+
+message TransactionResponse {
+  optional string currentTransactionId = 1;
+}
+
+// profileService: fame 
+
+message FameAccountProgression {
+  optional int64 xp = 1;
+  optional int64 serverXp = 2;
+  optional int64 stars = 3;
+  optional int64 elite = 4;
+}
+
+message FameClubProgression {
+  optional int64 xp = 1;
+}
+
+message GetFameResponse {
+  optional FameAccountProgression accountProgression = 1;
+  optional FameClubProgression clubProgression = 2;
+}
+
+message UpdateFameRequest {
+  optional int64 playertotalClientFame = 1;
+  optional int64 clubFameDelta = 2;
+  optional int64 stars = 3;
+  optional int64 elite = 4;
+  optional string transactionId = 5;
+}
+
+message FameAfter {
+  optional int64 xp = 1;
+  optional int64 serverXp = 2;
+}
+
+message FameAccountChange {
+  optional FameAfter after = 1;
+}
+
+message FameClubAfter {
+  optional int64 xp = 1;
+}
+
+message FameClubChange {
+  optional FameClubAfter after = 1;
+}
+
+message UpdateFameResponse {
+  optional FameAccountChange accountProgression = 1;
+  optional FameClubChange clubProgression = 2;
+}
+
+// storageService: ghosts
+
+enum BobObjectType {
+  BOB_OBJECT_TYPE_0 = 0;
+  BOB_OBJECT_TYPE_GHOST = 1;
+}
+
+enum BobAccessType {
+  BOB_ACCESS_TYPE_0 = 0;
+  BOB_ACCESS_TYPE_1 = 1;
+}
+
+message CreateBobRequest {
+  optional string mimeType = 1;
+  optional string checksum = 2;
+  optional int64 contentLength = 3;
+  optional bytes body = 4;
+  optional BobObjectType objectType = 5;
+  optional BobAccessType accessType = 6;
+}
+
+message BobFileDetails {
+  optional int64 id = 1;
+  optional string publicUrl = 2;
+  optional string checksum = 3;
+}
+
+message CreateBobResponse {
+  optional int64 id = 1;
+  optional BobFileDetails fileDetails = 2;
+}
+
+message GetRemoteUrlRequest {
+  optional int64 id = 1;
+}
+
+message GetRemoteUrlResponse {
+  optional int64 id = 1;
+  optional string publicUrl = 2;
+  optional string checksum = 3;
 }

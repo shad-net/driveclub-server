@@ -65,8 +65,6 @@ struct Parsed {
     int errorStatus = 400;
 };
 
-// Decodes a chunked body starting at `pos`. Returns the end offset, or nullopt if more data is
-// needed.
 QString peerName(const QTcpSocket* socket) {
     return QStringLiteral("%1:%2").arg(socket->peerAddress().toString()).arg(socket->peerPort());
 }
@@ -202,19 +200,27 @@ void HttpServer::onNewConnection() {
         socket->setProperty("idleTimer", QVariant::fromValue(static_cast<QObject*>(idle)));
         socket->setProperty("openedAt", QDateTime::currentMSecsSinceEpoch());
         socket->setProperty("requests", 0);
-        qCInfo(lcConn).noquote() << "connection from" << peer;
+        socket->setProperty("keepalives", 0);
         connect(socket, &QTcpSocket::readyRead, this, [this, socket] { onReadyRead(socket); });
         connect(socket, &QTcpSocket::disconnected, socket, [socket, peer] {
             const qint64 ms =
                 QDateTime::currentMSecsSinceEpoch() - socket->property("openedAt").toLongLong();
-            QString line = QStringLiteral("connection from %1 closed after %2 ms, %3 requests")
-                               .arg(peer)
-                               .arg(ms)
-                               .arg(socket->property("requests").toInt());
-            if (!socket->property("buffer").toByteArray().isEmpty()) {
-                line += QStringLiteral(" (unfinished request discarded)");
+            const int requests = socket->property("requests").toInt();
+            const int keepalives = socket->property("keepalives").toInt();
+            const bool unfinished = !socket->property("buffer").toByteArray().isEmpty();
+            if (requests > keepalives || requests == 0 || unfinished) {
+                QString line = QStringLiteral("connection from %1 closed after %2 ms, %3 requests")
+                                   .arg(peer)
+                                   .arg(ms)
+                                   .arg(requests);
+                if (keepalives > 0) {
+                    line += QStringLiteral(" (%1 keepalives)").arg(keepalives);
+                }
+                if (unfinished) {
+                    line += QStringLiteral(" (unfinished request discarded)");
+                }
+                qCInfo(lcConn).noquote() << line;
             }
-            qCInfo(lcConn).noquote() << line;
             socket->deleteLater();
         });
     }
@@ -276,6 +282,9 @@ void HttpServer::processNext(QTcpSocket* socket) {
             return;
         }
         guard->setProperty("busy", false);
+        if (response.keepalive) {
+            guard->setProperty("keepalives", guard->property("keepalives").toInt() + 1);
+        }
         send(guard, response, keepAlive);
         if (keepAlive) {
             QMetaObject::invokeMethod(

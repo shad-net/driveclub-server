@@ -7,6 +7,7 @@
 #include "http_server.h"
 
 #include <QElapsedTimer>
+
 //   GET    /api/status
 //   GET    /api/sessions                         EGS sessions (signed-in players)
 //   DELETE /api/sessions/<key>                   forget a session (the game must log in again)
@@ -18,13 +19,17 @@
 //   POST   /api/leaderboards/entries?board=<b>   add/replace {entrant, score | time_ms | points,
 //                                                attachment,
 //                                                name (optional display name)}
-//   GET    /api/players                          [{account_id, name, logged_in}] known names
+//   GET    /api/players                          known players [{account_id, name, logged_in,
+//                                                shadnet_account, first_seen, last_seen, fame,
+//                                                stars, elite}]
+//   POST   /api/players/fame                     {account_id, xp}: set a player's fame exactly
+//   GET    /api/ghosts                           uploaded ghosts (no data)
+//   DELETE /api/ghosts?id=<n>                    delete one
+//   GET    /api/challenges                       challenges grouped by id (lists + their board)
 //   GET    /api/gamestates                       OTG counter gamestates [{resource, version,
-//                                                                                   counts}]
-//   DELETE /api/gamestates?resource=<r>          forget one (the game starts from its
-//                                                                                 defaults)
-//   DELETE /api/leaderboards/entries?board=<b>&entrant=<e>
-//   GET    /api/requests[?after=<id>]            recent game requests (newest last)
+//   counts}] DELETE /api/gamestates?resource=<r>          forget one (the game starts from its
+//   defaults) DELETE /api/leaderboards/entries?board=<b>&entrant=<e> GET /api/requests[?after=<id>]
+//   recent game requests (newest last)
 class AdminService {
 public:
     explicit AdminService(const Config& config);

@@ -73,6 +73,31 @@ const char* const Migrations[] = {
         updated  INTEGER NOT NULL
     );
     )",
+    // 3: fame (profileService.getFame / updateFameInTransaction)
+    R"(
+    CREATE TABLE fame (
+        account_id INTEGER PRIMARY KEY,
+        xp         INTEGER NOT NULL DEFAULT 0,
+        stars      INTEGER,
+        elite      INTEGER,
+        updated    INTEGER NOT NULL
+    );
+    )",
+    // 4: ghosts uploaded with storageService.createBob, downloaded from /ghosts/<id>
+    R"(
+    CREATE TABLE ghosts (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id INTEGER NOT NULL,
+        mime_type  TEXT NOT NULL DEFAULT '',
+        checksum   TEXT NOT NULL DEFAULT '',
+        size       INTEGER NOT NULL,
+        data       BLOB NOT NULL,
+        created    INTEGER NOT NULL,
+        downloads  INTEGER NOT NULL DEFAULT 0,
+        last_download INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX ghosts_owner ON ghosts (account_id);
+    )",
 };
 
 QMutex& lock() {
@@ -291,6 +316,21 @@ QList<Score> boardScores(const QString& board) {
                   .arg(QLatin1String(ScoreColumns)));
     q.addBindValue(text(board));
     if (run(q, "read board")) {
+        while (q.next()) {
+            out.append(scoreFrom(q));
+        }
+    }
+    return out;
+}
+
+QList<Score> scoresWithGhosts() {
+    QList<Score> out;
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT %1 FROM scores WHERE attachment LIKE '%ghost:%' "
+                             "AND attachment NOT LIKE '%ghost:-%'")
+                  .arg(QLatin1String(ScoreColumns)));
+    if (run(q, "read ghost scores")) {
         while (q.next()) {
             out.append(scoreFrom(q));
         }
@@ -528,6 +568,126 @@ QList<GameState> gameStates() {
             g.counts = QJsonDocument::fromJson(q.value(2).toString().toUtf8()).object();
             g.updated = q.value(3).toLongLong();
             out.append(g);
+        }
+    }
+    return out;
+}
+
+// Fame
+
+std::optional<Fame> fame(qint64 accountId) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral(
+        "SELECT account_id, xp, stars, elite, updated FROM fame WHERE account_id = ?"));
+    q.addBindValue(accountId);
+    if (run(q, "read fame") && q.next()) {
+        Fame f;
+        f.accountId = q.value(0).toLongLong();
+        f.xp = q.value(1).toLongLong();
+        if (!q.value(2).isNull()) {
+            f.stars = q.value(2).toLongLong();
+        }
+        if (!q.value(3).isNull()) {
+            f.elite = q.value(3).toLongLong();
+        }
+        f.updated = q.value(4).toLongLong();
+        return f;
+    }
+    return std::nullopt;
+}
+
+bool putFame(const Fame& f) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("INSERT OR REPLACE INTO fame (account_id, xp, stars, elite, updated) "
+                             "VALUES (?, ?, ?, ?, ?)"));
+    q.addBindValue(f.accountId);
+    q.addBindValue(f.xp);
+    q.addBindValue(f.stars ? QVariant(*f.stars) : QVariant(QMetaType(QMetaType::LongLong)));
+    q.addBindValue(f.elite ? QVariant(*f.elite) : QVariant(QMetaType(QMetaType::LongLong)));
+    q.addBindValue(f.updated ? f.updated : now());
+    return run(q, "save fame");
+}
+
+// Ghosts
+
+qint64 putGhost(const Ghost& g, const QByteArray& data) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("INSERT INTO ghosts (account_id, mime_type, checksum, size, data, "
+                             "created) VALUES (?, ?, ?, ?, ?, ?)"));
+    q.addBindValue(g.accountId);
+    q.addBindValue(text(g.mimeType));
+    q.addBindValue(text(g.checksum));
+    q.addBindValue(qint64(data.size()));
+    q.addBindValue(data);
+    q.addBindValue(g.created ? g.created : now());
+    if (!run(q, "save ghost")) {
+        return 0;
+    }
+    return q.lastInsertId().toLongLong();
+}
+
+namespace {
+Ghost ghostFrom(const QSqlQuery& q) {
+    Ghost g;
+    g.id = q.value(0).toLongLong();
+    g.accountId = q.value(1).toLongLong();
+    g.mimeType = q.value(2).toString();
+    g.checksum = q.value(3).toString();
+    g.size = q.value(4).toLongLong();
+    g.created = q.value(5).toLongLong();
+    g.downloads = q.value(6).toInt();
+    g.lastDownload = q.value(7).toLongLong();
+    return g;
+}
+constexpr char GhostColumns[] =
+    "id, account_id, mime_type, checksum, size, created, downloads, last_download";
+} // namespace
+
+std::optional<Ghost> ghost(qint64 id, QByteArray* data) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT %1%2 FROM ghosts WHERE id = ?")
+                  .arg(QLatin1String(GhostColumns), data ? QStringLiteral(", data") : QString()));
+    q.addBindValue(id);
+    if (run(q, "read ghost") && q.next()) {
+        if (data) {
+            *data = q.value(8).toByteArray();
+        }
+        return ghostFrom(q);
+    }
+    return std::nullopt;
+}
+
+void countGhostDownload(qint64 id) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral(
+        "UPDATE ghosts SET downloads = downloads + 1, last_download = ? WHERE id = ?"));
+    q.addBindValue(now());
+    q.addBindValue(id);
+    run(q, "count ghost download");
+}
+
+bool removeGhost(qint64 id) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("DELETE FROM ghosts WHERE id = ?"));
+    q.addBindValue(id);
+    return run(q, "remove ghost") && q.numRowsAffected() > 0;
+}
+
+QList<Ghost> ghosts() {
+    QList<Ghost> out;
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(
+        QStringLiteral("SELECT %1 FROM ghosts ORDER BY id DESC").arg(QLatin1String(GhostColumns)));
+    if (run(q, "list ghosts")) {
+        while (q.next()) {
+            out.append(ghostFrom(q));
         }
     }
     return out;

@@ -10,9 +10,12 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QFile>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QInputDialog>
 #include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
@@ -25,19 +28,20 @@
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTableWidget>
+#include <QTimeZone>
 #include <QTimer>
 #include <QToolBar>
 #include <QUrlQuery>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <limits>
 #include <memory>
 
 namespace {
 
 constexpr int MaxTrafficRows = 2000;
 
-// ms since epoch -> local time
 QString when(double ms) {
     if (ms <= 0) {
         return QStringLiteral("-");
@@ -81,12 +85,21 @@ QTableWidget* makeTable(const QStringList& headers) {
     return t;
 }
 
+// The row's index into the JSON array is kept in column 0, so sorting keeps the mapping.
 QTableWidgetItem* cell(const QString& text, int index = -1) {
     auto* item = new QTableWidgetItem(text);
     if (index >= 0) {
         item->setData(Qt::UserRole, index);
     }
     return item;
+}
+
+QString byteSize(double bytes) {
+    if (bytes < 1024 * 1024) {
+        return bytes < 1024 ? QObject::tr("%1 B").arg(qint64(bytes))
+                            : QObject::tr("%1 KB").arg(bytes / 1024.0, 0, 'f', 1);
+    }
+    return QObject::tr("%1 MB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1);
 }
 
 QTableWidgetItem* numberCell(double value) {
@@ -135,7 +148,7 @@ QString scoreValue(quint64 score) {
         return time.isEmpty() ? QObject::tr("%L1 (as time)").arg(TimeMask - value) : time;
     }
     if (kind == 1) {
-        return QStringLiteral("%L1").arg(value * 1000);
+        return QObject::tr("%L1 (drift)").arg(value);
     }
     if (kind == 2) {
         return QStringLiteral("%L1").arg(value);
@@ -211,6 +224,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     tabs_->addTab(buildOverviewTab(), tr("Overview"));
     tabs_->addTab(buildPlayersTab(), tr("Players"));
     tabs_->addTab(buildLeaderboardsTab(), tr("Leaderboards"));
+    tabs_->addTab(buildChallengesTab(), tr("Challenges"));
+    tabs_->addTab(buildCountersTab(), tr("Counters"));
+    tabs_->addTab(buildGhostsTab(), tr("Ghosts"));
     tabs_->addTab(buildTrafficTab(), tr("Traffic"));
     setCentralWidget(tabs_);
 
@@ -273,9 +289,9 @@ QWidget* MainWindow::buildPlayersTab() {
     auto* layout = new QVBoxLayout(page);
 
     layout->addWidget(new QLabel(tr("<b>EGS sessions</b> (signed-in players)")));
-    sessionTable_ =
-        makeTable({tr("Name"), tr("Verified"), tr("shadNet account"), tr("Account ID"),
-                   tr("Client"), tr("PS Plus"), tr("Signed in"), tr("Last seen"), tr("Requests")});
+    sessionTable_ = makeTable({tr("Name"), tr("Verified"), tr("shadNet account"), tr("Account ID"),
+                               tr("Client"), tr("PS Plus"), tr("Signed in"), tr("Last seen"),
+                               tr("Requests"), tr("Transaction")});
     layout->addWidget(sessionTable_, 3);
     kick_ = new QPushButton(tr("Kick (drop session)"));
     kick_->setToolTip(tr("The game's next signed request no longer matches; it has to log in "
@@ -295,10 +311,108 @@ QWidget* MainWindow::buildPlayersTab() {
     tokenButtons->addWidget(revoke_);
     layout->addLayout(tokenButtons);
 
+    layout->addWidget(new QLabel(
+        tr("<b>Known players</b> (everyone who logged in, plus names from friend lookups and "
+           "test entries; Fame as the game last reported it)")));
+    playerTable_ =
+        makeTable({tr("Name"), tr("Account ID"), tr("Logged in"), tr("shadNet account"), tr("Fame"),
+                   tr("Stars"), tr("Fame updated"), tr("First seen"), tr("Last login")});
+    layout->addWidget(playerTable_, 3);
+    setFame_ = new QPushButton(tr("Set Fame..."));
+    setFame_->setToolTip(tr("Set the player's Fame exactly (also their Fame leaderboard entry). "
+                            "The game reads it at its next getFame; it never lowers its own "
+                            "Fame below what it already has."));
+    auto* playerButtons = new QHBoxLayout;
+    playerButtons->addStretch();
+    playerButtons->addWidget(setFame_);
+    layout->addLayout(playerButtons);
+
     connect(sessionTable_, &QTableWidget::itemSelectionChanged, this, &MainWindow::updateButtons);
     connect(tokenTable_, &QTableWidget::itemSelectionChanged, this, &MainWindow::updateButtons);
+    connect(playerTable_, &QTableWidget::itemSelectionChanged, this, &MainWindow::updateButtons);
+    connect(setFame_, &QPushButton::clicked, this, &MainWindow::setFame);
     connect(kick_, &QPushButton::clicked, this, &MainWindow::kickSession);
     connect(revoke_, &QPushButton::clicked, this, &MainWindow::revokeToken);
+    return page;
+}
+
+QWidget* MainWindow::buildChallengesTab() {
+    auto* page = new QWidget;
+    auto* layout = new QVBoxLayout(page);
+    layout->addWidget(new QLabel(
+        tr("<b>Challenges</b>: each one is on its creator's list and on every challenged player's "
+           "list; the times set on it are on its own board. End times are in the game's clock.")));
+    challengeTable_ = makeTable({tr("Challenge"), tr("Creator"), tr("Challenged"), tr("Ends"),
+                                 tr("Times"), tr("Best"), tr("Details")});
+    layout->addWidget(challengeTable_, 3);
+    challengeTitle_ = new QLabel(tr("Select a challenge to see its times"));
+    layout->addWidget(challengeTitle_);
+    challengeTimes_ = makeTable(
+        {tr("Rank"), tr("Player"), tr("Shown as"), tr("Score"), tr("Attachment"), tr("Updated")});
+    layout->addWidget(challengeTimes_, 2);
+    connect(challengeTable_, &QTableWidget::itemSelectionChanged, this,
+            &MainWindow::loadChallengeTimes);
+    return page;
+}
+
+QWidget* MainWindow::buildCountersTab() {
+    auto* page = new QWidget;
+    auto* layout = new QVBoxLayout(page);
+    layout->addWidget(new QLabel(
+        tr("<b>OTG counter stores</b> (<code>…/~gamestate</code>, e.g. ChallengeTimers). The game "
+           "reads them after login and sends changes as deltas; a player without one uses the "
+           "game's defaults.")));
+    counterTable_ =
+        makeTable({tr("Resource"), tr("Version"), tr("Counters"), tr("Values"), tr("Updated")});
+    layout->addWidget(counterTable_);
+    resetCounter_ = new QPushButton(tr("Reset to game defaults"));
+    resetCounter_->setToolTip(tr("Delete the stored counters; the game starts again from its "
+                                 "built-in defaults."));
+    auto* buttons = new QHBoxLayout;
+    buttons->addStretch();
+    buttons->addWidget(resetCounter_);
+    layout->addLayout(buttons);
+    connect(counterTable_, &QTableWidget::itemSelectionChanged, this, &MainWindow::updateButtons);
+    connect(resetCounter_, &QPushButton::clicked, this, &MainWindow::resetCounter);
+    return page;
+}
+
+QWidget* MainWindow::buildGhostsTab() {
+    auto* page = new QWidget;
+    auto* layout = new QVBoxLayout(page);
+    layout->addWidget(new QLabel(
+        tr("<b>Ghosts</b> uploaded by the game (storageService.createBob). A score carries its "
+           "ghost as <code>ghost:&lt;id&gt;</code> in its attachment; rivals download it from "
+           "the leaderboard. Deleting a ghost a score still uses makes that ghost unavailable "
+           "in the game.")));
+    qobject_cast<QLabel*>(layout->itemAt(0)->widget())->setWordWrap(true);
+    ghostTable_ =
+        makeTable({tr("Id"), tr("Uploaded by"), tr("Size (bytes)"), tr("Uploaded"), tr("Downloads"),
+                   tr("Last download"), tr("Used by scores"), tr("Type"), tr("Checksum (MD5)")});
+    layout->addWidget(ghostTable_, 3);
+    ghostTitle_ = new QLabel(tr("Select a ghost to see the scores that use it"));
+    layout->addWidget(ghostTitle_);
+    ghostUses_ = makeTable({tr("Board"), tr("Player"), tr("Score"), tr("Posted")});
+    layout->addWidget(ghostUses_, 2);
+    saveGhost_ = new QPushButton(tr("Save to file…"));
+    saveGhost_->setToolTip(tr("Download the selected ghost's data (not counted as a download)."));
+    deleteGhost_ = new QPushButton(tr("Delete ghost"));
+    deleteUnused_ = new QPushButton(tr("Delete unused ghosts"));
+    deleteUnused_->setToolTip(tr("Delete every ghost no stored score points to (e.g. replaced by "
+                                 "a better time)."));
+    auto* buttons = new QHBoxLayout;
+    buttons->addStretch();
+    buttons->addWidget(saveGhost_);
+    buttons->addWidget(deleteGhost_);
+    buttons->addWidget(deleteUnused_);
+    layout->addLayout(buttons);
+    connect(ghostTable_, &QTableWidget::itemSelectionChanged, this, [this] {
+        showGhostUses();
+        updateButtons();
+    });
+    connect(saveGhost_, &QPushButton::clicked, this, &MainWindow::saveGhost);
+    connect(deleteGhost_, &QPushButton::clicked, this, &MainWindow::deleteGhost);
+    connect(deleteUnused_, &QPushButton::clicked, this, &MainWindow::deleteUnusedGhosts);
     return page;
 }
 
@@ -307,8 +421,24 @@ QWidget* MainWindow::buildLeaderboardsTab() {
     auto* layout = new QVBoxLayout(page);
     auto* splitter = new QSplitter(Qt::Horizontal);
 
-    boardTable_ = makeTable({tr("Board"), tr("Entries"), tr("Best"), tr("Updated")});
-    splitter->addWidget(boardTable_);
+    auto* left = new QWidget;
+    auto* leftLayout = new QVBoxLayout(left);
+    leftLayout->setContentsMargins(0, 0, 0, 0);
+    auto* filterRow = new QHBoxLayout;
+    filterRow->addWidget(new QLabel(tr("Show:")));
+    boardFilter_ = new QComboBox;
+    boardFilter_->addItem(tr("Leaderboards"), QStringLiteral("leaderboard"));
+    boardFilter_->addItem(tr("Event history"), QStringLiteral("event_history"));
+    boardFilter_->addItem(tr("Challenge lists and boards"), QStringLiteral("challenge"));
+    boardFilter_->addItem(tr("Everything"), QString());
+    boardFilter_->setToolTip(tr("Challenges are easier to read on the Challenges tab."));
+    filterRow->addWidget(boardFilter_);
+    filterRow->addStretch();
+    leftLayout->addLayout(filterRow);
+    boardTable_ = makeTable({tr("Board"), tr("Entries"), tr("Best"), tr("Updated"), tr("Kind")});
+    leftLayout->addWidget(boardTable_);
+    splitter->addWidget(left);
+    connect(boardFilter_, &QComboBox::currentIndexChanged, this, &MainWindow::applyBoardFilter);
 
     auto* right = new QWidget;
     auto* rightLayout = new QVBoxLayout(right);
@@ -349,7 +479,7 @@ QWidget* MainWindow::buildTrafficTab() {
     auto* options = new QHBoxLayout;
     liveTraffic_ = new QCheckBox(tr("Live"));
     liveTraffic_->setChecked(true);
-    errorsOnly_ = new QCheckBox(tr("Errors only (status 400 and up)"));
+    errorsOnly_ = new QCheckBox(tr("Errors only (status 400 and up, except expected ones)"));
     auto* clear = new QPushButton(tr("Clear view"));
     options->addWidget(liveTraffic_);
     options->addWidget(errorsOnly_);
@@ -364,8 +494,8 @@ QWidget* MainWindow::buildTrafficTab() {
     connect(clear, &QPushButton::clicked, this, [this] { trafficTable_->setRowCount(0); });
     connect(errorsOnly_, &QCheckBox::toggled, this, [this](bool on) {
         for (int row = 0; row < trafficTable_->rowCount(); ++row) {
-            const int status = trafficTable_->item(row, 4)->text().toInt();
-            trafficTable_->setRowHidden(row, on && status < 400);
+            const bool error = trafficTable_->item(row, 4)->data(Qt::UserRole + 1).toBool();
+            trafficTable_->setRowHidden(row, on && !error);
         }
     });
     return page;
@@ -430,6 +560,26 @@ void MainWindow::refresh() {
             showBoards(r.json().array());
         }
     });
+    api_.get(QStringLiteral("/api/players"), [this](const ApiClient::Reply& r) {
+        if (r.ok()) {
+            showPlayers(r.json().array());
+        }
+    });
+    api_.get(QStringLiteral("/api/challenges"), [this](const ApiClient::Reply& r) {
+        if (r.ok()) {
+            showChallenges(r.json().array());
+        }
+    });
+    api_.get(QStringLiteral("/api/gamestates"), [this](const ApiClient::Reply& r) {
+        if (r.ok()) {
+            showCounters(r.json().array());
+        }
+    });
+    api_.get(QStringLiteral("/api/ghosts"), [this](const ApiClient::Reply& r) {
+        if (r.ok()) {
+            showGhosts(r.json().array());
+        }
+    });
 }
 
 void MainWindow::refreshTraffic() {
@@ -471,7 +621,11 @@ void MainWindow::showStatus(const QJsonObject& s) {
             .arg(Driveclub::Version(), Driveclub::BuildTimestamp().replace('T', ' ')));
     add(tr("Signed-in players (EGS):"), QString::number(s.value("sessions").toInteger()));
     add(tr("OTG tokens:"), QString::number(s.value("otg_tokens").toInteger()));
+    add(tr("Known players:"), QString::number(s.value("players").toInteger()));
     add(tr("Leaderboards:"), QString::number(s.value("leaderboards").toInteger()));
+    add(tr("Ghosts:"), tr("%1 (%2)")
+                           .arg(s.value("ghosts").toInteger())
+                           .arg(byteSize(s.value("ghost_bytes").toDouble())));
     add(tr("Game requests served:"), QString::number(s.value("requests").toInteger()));
     add(tr("EGS serverIdentifier:"), tr("%1  (every OTG_Service_* TSS value must contain it)")
                                          .arg(s.value("server_identifier").toString()));
@@ -504,6 +658,7 @@ void MainWindow::showSessions(const QJsonArray& sessions) {
         sessionTable_->setItem(i, 6, cell(when(s.value("created").toDouble())));
         sessionTable_->setItem(i, 7, cell(ago(s.value("last_seen").toDouble())));
         sessionTable_->setItem(i, 8, numberCell(s.value("requests").toDouble()));
+        sessionTable_->setItem(i, 9, cell(s.value("transaction").toString()));
     }
     sessionTable_->setSortingEnabled(true);
     sessionTable_->resizeColumnsToContents();
@@ -529,6 +684,330 @@ void MainWindow::showTokens(const QJsonArray& tokens) {
     updateButtons();
 }
 
+void MainWindow::showPlayers(const QJsonArray& players) {
+    players_ = players;
+    playerTable_->setSortingEnabled(false);
+    playerTable_->setRowCount(int(players.size()));
+    for (int i = 0; i < players.size(); ++i) {
+        const QJsonObject p = players.at(i).toObject();
+        playerTable_->setItem(i, 0, cell(p.value("name").toString(), i));
+        playerTable_->setItem(i, 1, numberCell(p.value("account_id").toString().toDouble()));
+        playerTable_->setItem(i, 2, cell(yesNo(p.value("logged_in").toBool())));
+        playerTable_->setItem(i, 3, cell(p.value("shadnet_account").toString()));
+        auto* fame = p.contains("fame") ? numberCell(p.value("fame").toDouble()) : cell(QString());
+        playerTable_->setItem(i, 4, fame);
+        playerTable_->setItem(
+            i, 5, p.contains("stars") ? numberCell(p.value("stars").toDouble()) : cell(QString()));
+        playerTable_->setItem(i, 6, cell(ago(p.value("fame_updated").toDouble())));
+        playerTable_->setItem(i, 7, cell(when(p.value("first_seen").toDouble())));
+        playerTable_->setItem(i, 8,
+                              cell(p.value("logged_in").toBool()
+                                       ? ago(p.value("last_seen").toDouble())
+                                       : QStringLiteral("-")));
+    }
+    playerTable_->setSortingEnabled(true);
+    playerTable_->resizeColumnsToContents();
+    updateButtons();
+}
+
+void MainWindow::showChallenges(const QJsonArray& challenges) {
+    const int previous = selectedIndex(challengeTable_);
+    const QString selectedId =
+        previous < 0 ? QString() : challenges_.at(previous).toObject().value("id").toString();
+    challenges_ = challenges;
+    challengeTable_->blockSignals(true);
+    challengeTable_->setSortingEnabled(false);
+    challengeTable_->setRowCount(int(challenges.size()));
+    int reselect = -1;
+    for (int i = 0; i < challenges.size(); ++i) {
+        const QJsonObject c = challenges.at(i).toObject();
+        QStringList challenged;
+        for (const QJsonValue& m : c.value("members").toArray()) {
+            const QJsonObject o = m.toObject();
+            if ((o.value("flags").toInteger() & 1) == 0) {
+                challenged << o.value("name").toString();
+            }
+        }
+        challengeTable_->setItem(i, 0, cell(c.value("id").toString(), i));
+        challengeTable_->setItem(i, 1, cell(c.value("creator_name").toString()));
+        challengeTable_->setItem(i, 2, cell(challenged.join(QStringLiteral(", "))));
+        challengeTable_->setItem(i, 3,
+                                 cell(QDateTime::fromMSecsSinceEpoch(
+                                          qint64(c.value("ends").toDouble()), QTimeZone::utc())
+                                          .toString(QStringLiteral("yyyy-MM-dd hh:mm"))));
+        challengeTable_->setItem(i, 4, numberCell(c.value("entries").toDouble()));
+        const QString best = c.value("best").toString();
+        challengeTable_->setItem(
+            i, 5,
+            cell(best.isEmpty() ? QString()
+                                : QStringLiteral("%1 (%2)").arg(scoreValue(best.toULongLong()),
+                                                                c.value("best_name").toString())));
+        QStringList details;
+        for (const QJsonValue& v : c.value("attachment").toArray()) {
+            details << v.toString();
+        }
+        auto* detailCell = cell(details.join(QStringLiteral(", ")));
+        detailCell->setToolTip(details.join('\n'));
+        challengeTable_->setItem(i, 6, detailCell);
+        if (c.value("id").toString() == selectedId) {
+            reselect = i;
+        }
+    }
+    challengeTable_->setSortingEnabled(true);
+    challengeTable_->resizeColumnsToContents();
+    for (int row = 0; reselect >= 0 && row < challengeTable_->rowCount(); ++row) {
+        if (challengeTable_->item(row, 0)->data(Qt::UserRole).toInt() == reselect) {
+            challengeTable_->selectRow(row);
+        }
+    }
+    challengeTable_->blockSignals(false);
+    loadChallengeTimes();
+}
+
+void MainWindow::loadChallengeTimes() {
+    const int i = selectedIndex(challengeTable_);
+    if (i < 0) {
+        challengeTitle_->setText(tr("Select a challenge to see its times"));
+        challengeTimes_->setRowCount(0);
+        return;
+    }
+    const QJsonObject c = challenges_.at(i).toObject();
+    const QString board = c.value("board").toString();
+    api_.get(
+        QStringLiteral("/api/leaderboards/entries?board=%1").arg(enc(board)),
+        [this, c, board](const ApiClient::Reply& r) {
+            const int now = selectedIndex(challengeTable_);
+            if (now < 0 || challenges_.at(now).toObject().value("board").toString() != board) {
+                return;
+            }
+            challengeTitle_->setText(tr("<b>%1</b> by %2: times set on it")
+                                         .arg(c.value("id").toString().toHtmlEscaped(),
+                                              c.value("creator_name").toString().toHtmlEscaped()));
+            const QJsonArray entries = r.ok() ? r.json().array() : QJsonArray{};
+            challengeTimes_->setSortingEnabled(false);
+            challengeTimes_->setRowCount(int(entries.size()));
+            for (int k = 0; k < entries.size(); ++k) {
+                const QJsonObject e = entries.at(k).toObject();
+                const quint64 score = e.value("score").toString().toULongLong();
+                auto* rank = numberCell(e.value("rank").toDouble());
+                rank->setData(Qt::UserRole, k);
+                challengeTimes_->setItem(k, 0, rank);
+                challengeTimes_->setItem(k, 1, cell(playerName(e.value("entrant").toString())));
+                challengeTimes_->setItem(k, 2, cell(scoreValue(score)));
+                challengeTimes_->setItem(k, 3, scoreCell(score));
+                QStringList attachment;
+                for (const QJsonValue& v : e.value("attachment").toArray()) {
+                    attachment << v.toString();
+                }
+                challengeTimes_->setItem(k, 4, cell(attachment.join(QStringLiteral(", "))));
+                challengeTimes_->setItem(k, 5, cell(when(e.value("updated").toDouble())));
+            }
+            challengeTimes_->setSortingEnabled(true);
+            challengeTimes_->resizeColumnsToContents();
+        });
+}
+
+void MainWindow::showCounters(const QJsonArray& counters) {
+    counters_ = counters;
+    counterTable_->setSortingEnabled(false);
+    counterTable_->setRowCount(int(counters.size()));
+    for (int i = 0; i < counters.size(); ++i) {
+        const QJsonObject c = counters.at(i).toObject();
+        const QJsonObject counts = c.value("counts").toObject();
+        QStringList values;
+        for (auto it = counts.constBegin(); it != counts.constEnd(); ++it) {
+            values << QStringLiteral("%1 = %2").arg(it.key()).arg(it.value().toInteger());
+        }
+        counterTable_->setItem(i, 0, cell(c.value("resource").toString(), i));
+        counterTable_->setItem(i, 1, numberCell(c.value("version").toDouble()));
+        counterTable_->setItem(i, 2, numberCell(counts.size()));
+        auto* valuesCell = cell(values.join(QStringLiteral(", ")));
+        valuesCell->setToolTip(values.join('\n'));
+        counterTable_->setItem(i, 3, valuesCell);
+        counterTable_->setItem(i, 4, cell(ago(c.value("updated").toDouble())));
+    }
+    counterTable_->setSortingEnabled(true);
+    counterTable_->resizeColumnsToContents();
+    updateButtons();
+}
+
+namespace {
+QString checksumHex(const QString& base64) {
+    return QString::fromLatin1(QByteArray::fromBase64(base64.toLatin1()).toHex());
+}
+} // namespace
+
+void MainWindow::showGhosts(const QJsonArray& ghosts) {
+    // Keep the selection across the 5 s refresh.
+    const int old = selectedIndex(ghostTable_);
+    const QString selected =
+        old < 0 ? QString() : ghosts_.at(old).toObject().value("id").toString();
+    ghosts_ = ghosts;
+    ghostTable_->blockSignals(true);
+    ghostTable_->setSortingEnabled(false);
+    ghostTable_->clearSelection();
+    ghostTable_->setRowCount(int(ghosts.size()));
+    int reselect = -1;
+    for (int i = 0; i < ghosts.size(); ++i) {
+        const QJsonObject g = ghosts.at(i).toObject();
+        const QString id = g.value("id").toString();
+        const QJsonArray uses = g.value("used_on").toArray();
+        auto* idCell = numberCell(id.toDouble());
+        idCell->setData(Qt::UserRole, i);
+        ghostTable_->setItem(i, 0, idCell);
+        auto* who = cell(g.value("name").toString());
+        who->setToolTip(g.value("account_id").toString());
+        ghostTable_->setItem(i, 1, who);
+        auto* size = numberCell(g.value("size").toDouble()); // bytes: sorts as a number
+        size->setToolTip(byteSize(g.value("size").toDouble()));
+        ghostTable_->setItem(i, 2, size);
+        ghostTable_->setItem(i, 3, cell(ago(g.value("created").toDouble())));
+        ghostTable_->setItem(i, 4, numberCell(g.value("downloads").toDouble()));
+        const double last = g.value("last_download").toDouble();
+        ghostTable_->setItem(i, 5, cell(last > 0 ? ago(last) : tr("never")));
+        auto* used = cell(uses.isEmpty() ? tr("none (unused)") : QString::number(uses.size()));
+        if (uses.isEmpty()) {
+            used->setForeground(Qt::gray);
+        }
+        ghostTable_->setItem(i, 6, used);
+        ghostTable_->setItem(i, 7, cell(g.value("mime_type").toString()));
+        auto* sum = cell(checksumHex(g.value("checksum").toString()));
+        sum->setToolTip(tr("base64: %1").arg(g.value("checksum").toString()));
+        ghostTable_->setItem(i, 8, sum);
+        if (id == selected) {
+            reselect = i;
+        }
+    }
+    ghostTable_->setSortingEnabled(true);
+    if (reselect >= 0) {
+        for (int row = 0; row < ghostTable_->rowCount(); ++row) {
+            if (ghostTable_->item(row, 0)->data(Qt::UserRole).toInt() == reselect) {
+                ghostTable_->selectRow(row);
+                break;
+            }
+        }
+    }
+    ghostTable_->blockSignals(false);
+    ghostTable_->resizeColumnsToContents();
+    showGhostUses();
+    updateButtons();
+}
+
+void MainWindow::showGhostUses() {
+    const int i = selectedIndex(ghostTable_);
+    ghostUses_->setSortingEnabled(false);
+    if (i < 0) {
+        ghostTitle_->setText(tr("Select a ghost to see the scores that use it"));
+        ghostUses_->setRowCount(0);
+        return;
+    }
+    const QJsonObject g = ghosts_.at(i).toObject();
+    const QJsonArray uses = g.value("used_on").toArray();
+    ghostTitle_->setText(uses.isEmpty()
+                             ? tr("Ghost %1: no stored score uses it").arg(g.value("id").toString())
+                             : tr("Ghost %1 is used by %n score(s)", nullptr, int(uses.size()))
+                                   .arg(g.value("id").toString()));
+    ghostUses_->setRowCount(int(uses.size()));
+    for (int r = 0; r < uses.size(); ++r) {
+        const QJsonObject u = uses.at(r).toObject();
+        ghostUses_->setItem(r, 0, cell(u.value("board").toString()));
+        const QString entrant = u.value("entrant").toString();
+        auto* who = cell(playerName(entrant));
+        who->setToolTip(entrant);
+        ghostUses_->setItem(r, 1, who);
+        ghostUses_->setItem(r, 2, cell(scoreValue(u.value("score").toString().toULongLong())));
+        ghostUses_->setItem(r, 3, cell(ago(u.value("updated").toDouble())));
+    }
+    ghostUses_->setSortingEnabled(true);
+    ghostUses_->resizeColumnsToContents();
+}
+
+void MainWindow::saveGhost() {
+    const int i = selectedIndex(ghostTable_);
+    if (i < 0) {
+        return;
+    }
+    const QString id = ghosts_.at(i).toObject().value("id").toString();
+    const QString file = QFileDialog::getSaveFileName(this, tr("Save ghost %1").arg(id),
+                                                      QStringLiteral("ghost-%1.bin").arg(id));
+    if (file.isEmpty()) {
+        return;
+    }
+    api_.get(QStringLiteral("/api/ghosts/data?id=%1").arg(id),
+             [this, file, id](const ApiClient::Reply& r) {
+                 if (!r.ok()) {
+                     reportError(tr("Save ghost"), r);
+                     return;
+                 }
+                 QFile out(file);
+                 if (!out.open(QIODevice::WriteOnly) || out.write(r.body) != r.body.size()) {
+                     setStatus(tr("Could not write %1: %2").arg(file, out.errorString()), true);
+                     return;
+                 }
+                 setStatus(tr("Ghost %1 saved to %2 (%3 bytes)").arg(id, file).arg(r.body.size()));
+             });
+}
+
+void MainWindow::deleteGhosts(const QStringList& ids, const QString& question) {
+    if (ids.isEmpty() ||
+        QMessageBox::question(this, tr("Delete ghosts"), question) != QMessageBox::Yes) {
+        return;
+    }
+    auto left = std::make_shared<int>(int(ids.size()));
+    auto failed = std::make_shared<int>(0);
+    for (const QString& id : ids) {
+        api_.remove(QStringLiteral("/api/ghosts?id=%1").arg(id),
+                    [this, left, failed, count = ids.size()](const ApiClient::Reply& r) {
+                        if (!r.ok()) {
+                            ++*failed;
+                            reportError(tr("Delete ghost"), r);
+                        }
+                        if (--*left == 0) {
+                            if (*failed == 0) {
+                                setStatus(tr("%n ghost(s) deleted", nullptr, int(count)));
+                            }
+                            refresh();
+                        }
+                    });
+    }
+}
+
+void MainWindow::deleteGhost() {
+    const int i = selectedIndex(ghostTable_);
+    if (i < 0) {
+        return;
+    }
+    const QJsonObject g = ghosts_.at(i).toObject();
+    const qsizetype uses = g.value("used_on").toArray().size();
+    QString question =
+        tr("Delete ghost %1 of %2?").arg(g.value("id").toString(), g.value("name").toString());
+    if (uses > 0) {
+        question += QLatin1Char(' ') +
+                    tr("%n score(s) still use it: rivals will no longer be able to race it.",
+                       nullptr, int(uses));
+    }
+    deleteGhosts({g.value("id").toString()}, question);
+}
+
+void MainWindow::deleteUnusedGhosts() {
+    QStringList ids;
+    qint64 bytes = 0;
+    for (const QJsonValue& v : ghosts_) {
+        const QJsonObject g = v.toObject();
+        if (g.value("used_on").toArray().isEmpty()) {
+            ids << g.value("id").toString();
+            bytes += qint64(g.value("size").toDouble());
+        }
+    }
+    if (ids.isEmpty()) {
+        setStatus(tr("Every ghost is used by a score"));
+        return;
+    }
+    deleteGhosts(ids, tr("Delete %n unused ghost(s) (%1)? No stored score points to them.", nullptr,
+                         int(ids.size()))
+                          .arg(byteSize(double(bytes))));
+}
+
 void MainWindow::showBoards(const QJsonArray& boards) {
     const QString selected = selectedBoard();
     boards_ = boards;
@@ -546,6 +1025,14 @@ void MainWindow::showBoards(const QJsonArray& boards) {
         bestCell->setData(Qt::UserRole + 1, best);
         boardTable_->setItem(i, 2, bestCell);
         boardTable_->setItem(i, 3, cell(when(b.value("updated").toDouble())));
+        const QString kind = b.value("kind").toString();
+        const QString kindText = kind == QLatin1String("event_history")     ? tr("event history")
+                                 : kind == QLatin1String("challenge_list")  ? tr("challenge list")
+                                 : kind == QLatin1String("challenge_board") ? tr("challenge times")
+                                                                            : tr("leaderboard");
+        auto* kindCell = cell(kindText);
+        kindCell->setData(Qt::UserRole + 2, kind);
+        boardTable_->setItem(i, 4, kindCell);
         if (b.value("name").toString() == selected) {
             reselect = i;
         }
@@ -560,8 +1047,30 @@ void MainWindow::showBoards(const QJsonArray& boards) {
         }
     }
     boardTable_->blockSignals(false);
+    applyBoardFilter();
     loadBoardEntries();
     updateButtons();
+}
+
+void MainWindow::applyBoardFilter() {
+    const QString wanted = boardFilter_->currentData().toString();
+    for (int row = 0; row < boardTable_->rowCount(); ++row) {
+        const QString kind = boardTable_->item(row, 4)->data(Qt::UserRole + 2).toString();
+        const bool show =
+            wanted.isEmpty() || kind == wanted ||
+            (wanted == QLatin1String("challenge") && kind.startsWith(QLatin1String("challenge")));
+        boardTable_->setRowHidden(row, !show);
+    }
+}
+
+QString MainWindow::playerName(const QString& accountId) const {
+    for (const QJsonValue& v : players_) {
+        const QJsonObject p = v.toObject();
+        if (p.value("account_id").toString() == accountId) {
+            return p.value("name").toString();
+        }
+    }
+    return accountId;
 }
 
 QString MainWindow::selectedBoard() const {
@@ -632,16 +1141,23 @@ void MainWindow::appendTraffic(const QJsonArray& requests) {
         trafficTable_->setItem(row, 2, cell(r.value("method").toString()));
         const QString label = r.value("label").toString();
         trafficTable_->setItem(row, 3, cell(label.isEmpty() ? tr("(unknown)") : label));
+        // An expected status (e.g. 404 = gamestate not stored yet) is not an error.
+        const bool error = status >= 400 && !r.value("expected").toBool();
         auto* statusItem = cell(QString::number(status));
-        if (status >= 400) {
+        statusItem->setData(Qt::UserRole + 1, error);
+        if (error) {
             statusItem->setForeground(QColor(0xc0, 0x20, 0x20));
+        } else if (status >= 400) {
+            statusItem->setForeground(QColor(0x80, 0x80, 0x80));
+            statusItem->setToolTip(tr("Expected answer, not an error (for a gamestate: nothing "
+                                      "stored yet, the game uses its defaults)"));
         }
         trafficTable_->setItem(row, 4, statusItem);
         trafficTable_->setItem(row, 5, numberCell(r.value("ms").toDouble()));
         trafficTable_->setItem(row, 6, numberCell(r.value("bytes_in").toDouble()));
         trafficTable_->setItem(row, 7, numberCell(r.value("bytes_out").toDouble()));
         trafficTable_->setItem(row, 8, cell(r.value("path").toString()));
-        trafficTable_->setRowHidden(row, errorsOnly_->isChecked() && status < 400);
+        trafficTable_->setRowHidden(row, errorsOnly_->isChecked() && !error);
     }
     while (trafficTable_->rowCount() > MaxTrafficRows) {
         trafficTable_->removeRow(0);
@@ -674,6 +1190,57 @@ void MainWindow::kickSession() {
                 });
 }
 
+void MainWindow::setFame() {
+    const int i = selectedIndex(playerTable_);
+    if (i < 0) {
+        return;
+    }
+    const QJsonObject p = players_.at(i).toObject();
+    bool ok = false;
+    const int xp =
+        QInputDialog::getInt(this, tr("Set Fame"),
+                             tr("Fame of %1 (account %2):")
+                                 .arg(p.value("name").toString(), p.value("account_id").toString()),
+                             p.value("fame").toInt(), 0, std::numeric_limits<int>::max(), 1, &ok);
+    if (!ok) {
+        return;
+    }
+    const QJsonObject body{{QStringLiteral("account_id"), p.value("account_id").toString()},
+                           {QStringLiteral("xp"), xp}};
+    api_.post(QStringLiteral("/api/players/fame"), QJsonDocument(body),
+              [this, p, xp](const ApiClient::Reply& r) {
+                  if (!r.ok()) {
+                      reportError(tr("Set Fame"), r);
+                      return;
+                  }
+                  setStatus(tr("Fame of %1 set to %L2").arg(p.value("name").toString()).arg(xp));
+                  refresh();
+              });
+}
+
+void MainWindow::resetCounter() {
+    const int i = selectedIndex(counterTable_);
+    if (i < 0) {
+        return;
+    }
+    const QString resource = counters_.at(i).toObject().value("resource").toString();
+    if (QMessageBox::question(this, tr("Reset counters"),
+                              tr("Delete the counters of %1? The game starts again from its "
+                                 "defaults.")
+                                  .arg(resource)) != QMessageBox::Yes) {
+        return;
+    }
+    api_.remove(QStringLiteral("/api/gamestates?resource=%1").arg(enc(resource)),
+                [this](const ApiClient::Reply& r) {
+                    if (!r.ok()) {
+                        reportError(tr("Reset counters"), r);
+                        return;
+                    }
+                    setStatus(tr("Counters reset"));
+                    refresh();
+                });
+}
+
 void MainWindow::revokeToken() {
     const int i = selectedIndex(tokenTable_);
     if (i < 0) {
@@ -691,8 +1258,6 @@ void MainWindow::revokeToken() {
                 });
 }
 
-// Adds one entry, or a run of test entries, to any board (also boards the game has not written
-// yet, such as fame/player), so the game's leaderboard screens can be checked without racing.
 void MainWindow::addEntries() {
     QDialog dialog(this);
     dialog.setWindowTitle(tr("Add leaderboard entries"));
@@ -728,8 +1293,9 @@ void MainWindow::addEntries() {
     form->addRow(tr("Name:"), name);
 
     auto* kind = new QComboBox;
-    kind->addItem(tr("Points (fame, drift, score)"));
+    kind->addItem(tr("Points (fame)"));
     kind->addItem(tr("Time (m:ss.mmm)"));
+    kind->addItem(tr("Drift points (common/drift/..., drift events)"));
     form->addRow(tr("Kind:"), kind);
 
     auto* value = new QLineEdit(QStringLiteral("50000"));
@@ -786,6 +1352,10 @@ void MainWindow::addEntries() {
         }
         if (isTime) {
             body.insert(QStringLiteral("time_ms"), best + i * step);
+        } else if (kind->currentIndex() == 2) {
+            // Kind 1, as the game posts drift scores: (1 << 60) | points.
+            const quint64 points = quint64(std::max<qint64>(0, best - i * step));
+            body.insert(QStringLiteral("score"), QString::number((quint64(1) << 60) | points));
         } else {
             body.insert(QStringLiteral("points"), std::max<qint64>(0, best - i * step));
         }
@@ -856,6 +1426,11 @@ void MainWindow::updateButtons() {
     clearBoard_->setEnabled(connected_ && !selectedBoard().isEmpty());
     removeEntry_->setEnabled(connected_ && selectedIndex(entryTable_) >= 0);
     addEntry_->setEnabled(connected_);
+    setFame_->setEnabled(connected_ && selectedIndex(playerTable_) >= 0);
+    resetCounter_->setEnabled(connected_ && selectedIndex(counterTable_) >= 0);
+    saveGhost_->setEnabled(connected_ && selectedIndex(ghostTable_) >= 0);
+    deleteGhost_->setEnabled(connected_ && selectedIndex(ghostTable_) >= 0);
+    deleteUnused_->setEnabled(connected_ && !ghosts_.isEmpty());
 }
 
 void MainWindow::setStatus(const QString& text, bool error) {

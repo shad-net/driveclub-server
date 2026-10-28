@@ -18,6 +18,7 @@ struct RequestRecord {
     qint64 elapsedMs = 0;
     qint64 bytesIn = 0;
     qint64 bytesOut = 0;
+    bool expected = false; // see HttpResponse::expected
 };
 
 void recordRequest(const RequestRecord& record);

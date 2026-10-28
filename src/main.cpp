@@ -116,6 +116,7 @@ int main(int argc, char* argv[]) {
                                                   : qPrintable(config->otg.baseUrl));
     egsRestoreSessions();
     otgRestoreTokens();
+    startKeepaliveSummaries();
     setupAuth(config->auth);
     if (config->auth.shadnetUrl.isEmpty()) {
         qInfo("shadNet checks off (shadnet.url empty): logins are accepted as sent");
@@ -129,12 +130,20 @@ int main(int argc, char* argv[]) {
 
     const QString basePath = config->basePath;
     HttpServer server([basePath](const HttpRequest& request, HttpServer::Responder reply) {
-        // Every answer goes through here, so each request is traced together with its answer.
         const QString label = endpointLabel(request);
-        const quint64 id = traceRequest(request, label);
+        const bool poll = isPushPoll(request);
+        const quint64 id = poll ? traceNextId() : traceRequest(request, label);
         QElapsedTimer timer;
         timer.start();
-        auto respond = [reply, id, label, timer, request](HttpResponse response) {
+        auto respond = [reply, id, label, timer, request, poll](HttpResponse response) {
+            if (response.keepalive) {
+                traceKeepalive(request);
+                reply(std::move(response));
+                return;
+            }
+            if (poll) {
+                traceRequest(request, label, id);
+            }
             traceResponse(id, label, request, response, timer.elapsed());
             RequestRecord record;
             record.id = id;
@@ -150,6 +159,7 @@ int main(int argc, char* argv[]) {
             record.elapsedMs = timer.elapsed();
             record.bytesIn = request.body.size();
             record.bytesOut = response.body.size();
+            record.expected = response.expected;
             recordRequest(record);
             reply(std::move(response));
         };

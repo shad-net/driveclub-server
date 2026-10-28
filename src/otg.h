@@ -16,7 +16,7 @@
 // 1. GET https://hub.services.otg.scee.com/titles/driveclub/domains
 // 2. GET <auth>/login/driveclub?provider=psn&code=<NpAuth code>
 // 3. Services under <gateway>/<zone>/<serverIdentifier>/v01/<resource>. Leaderboards
-//    (<board>/~leaderboard reads, score posts) nd counter gamestates (<...>/~gamestate) are
+//    (<board>/~leaderboard reads, score posts) and counter gamestates (<...>/~gamestate) are
 //    handled, other resources get 404 and a log line.
 struct OtgConfig {
     QString baseUrl;
@@ -27,7 +27,7 @@ struct OtgConfig {
 
 void setOtgConfig(const OtgConfig& config);
 
-//  For the admin API
+// ---- For the admin API ----
 struct OtgTokenInfo {
     QString token;
     QString name;    // shadNet online id when verified
@@ -39,7 +39,9 @@ struct OtgTokenInfo {
 QList<OtgTokenInfo> otgTokens();
 bool otgDropToken(const QString& token);
 void otgRestoreTokens();
+QString otgBoardKind(const QString& name);
 QJsonArray otgBoardList();
+QJsonArray otgChallenges();
 std::optional<QJsonArray> otgBoardEntries(const QString& name);
 bool otgRemoveEntry(const QString& board, const QString& entrant);
 bool otgClearBoard(const QString& board);
@@ -55,6 +57,6 @@ constexpr quint64 otgTimeScore(quint64 ms) {
 constexpr quint64 otgPointsScore(quint64 points) {
     return (quint64(2) << 60) | (points & OtgTimeMask);
 }
-
+QString otgBaseUrl(const HttpRequest& request);
 bool handleOtg(const HttpRequest& request, const QString& endpoint,
                const HttpServer::Responder& respond);

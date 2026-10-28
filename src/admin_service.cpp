@@ -11,10 +11,13 @@
 #include "version.h"
 
 #include <QCryptographicHash>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLoggingCategory>
+#include <QRegularExpression>
+#include <QSet>
 
 namespace {
 
@@ -54,6 +57,17 @@ void AdminService::handle(const HttpRequest& request, HttpServer::Responder resp
         !sameKey(request.headers.value("x-admin-key"), config_.adminKey)) {
         qCWarning(lcAdmin).noquote()
             << request.method << request.path << "from" << request.peer.toString() << "-> 401";
+        static QSet<QString> warned;
+        const bool gamePath = request.path.startsWith(QLatin1String("/egs/")) ||
+                              request.path.startsWith(QLatin1String("/titles/")) ||
+                              request.path.startsWith(QLatin1String("/login/"));
+        if (gamePath && !warned.contains(request.peer.toString())) {
+            warned.insert(request.peer.toString());
+            qCWarning(lcAdmin).noquote()
+                << "a game is connecting to the ADMIN port from" << request.peer.toString()
+                << ": its EGS/OTG address must use the game port" << config_.port
+                << "(listen.port), not the admin port" << config_.adminPort;
+        }
         respond(error(401, QStringLiteral("missing or wrong X-Admin-Key")));
         return;
     }
@@ -132,6 +146,66 @@ HttpResponse AdminService::route(const HttpRequest& request) {
             }
         }
     }
+    if (what == QLatin1String("ghosts") && parts.size() == 3 && parts[2] == QLatin1String("data") &&
+        m == "GET") {
+        QByteArray data;
+        const qint64 id = request.query.queryItemValue(QStringLiteral("id")).toLongLong();
+        const auto g = db::ghost(id, &data);
+        if (!g) {
+            return error(404, QStringLiteral("no such ghost"));
+        }
+        HttpResponse r;
+        r.contentType = "application/octet-stream";
+        r.body = data;
+        return r;
+    }
+    if (what == QLatin1String("ghosts") && parts.size() == 2) {
+        if (m == "GET") {
+            static const QRegularExpression ghostRef(QStringLiteral("(?:^|,)ghost:(\\d+)(?:,|$)"));
+            QHash<qint64, QJsonArray> usedOn;
+            for (const db::Score& sc : db::scoresWithGhosts()) {
+                for (const QJsonValue& a : sc.attachment) {
+                    const auto match = ghostRef.match(a.toString());
+                    if (match.hasMatch()) {
+                        usedOn[match.captured(1).toLongLong()].append(QJsonObject{
+                            {QStringLiteral("board"), sc.board},
+                            {QStringLiteral("entrant"), sc.entrant},
+                            {QStringLiteral("score"), QString::number(sc.score)},
+                            {QStringLiteral("updated"), double(sc.updated)},
+                        });
+                        break;
+                    }
+                }
+            }
+            QJsonArray out;
+            for (const db::Ghost& g : db::ghosts()) {
+                out.append(QJsonObject{
+                    {QStringLiteral("id"), QString::number(g.id)},
+                    {QStringLiteral("account_id"), QString::number(g.accountId)},
+                    {QStringLiteral("name"), egsPlayerName(g.accountId)},
+                    {QStringLiteral("mime_type"), g.mimeType},
+                    {QStringLiteral("checksum"), g.checksum},
+                    {QStringLiteral("size"), g.size},
+                    {QStringLiteral("created"), double(g.created)},
+                    {QStringLiteral("downloads"), g.downloads},
+                    {QStringLiteral("last_download"), double(g.lastDownload)},
+                    {QStringLiteral("used_on"), usedOn.value(g.id)},
+                });
+            }
+            return json(200, out);
+        }
+        if (m == "DELETE") {
+            const qint64 id = request.query.queryItemValue(QStringLiteral("id")).toLongLong();
+            if (!db::removeGhost(id)) {
+                return error(404, QStringLiteral("no such ghost"));
+            }
+            qCInfo(lcAdmin).noquote() << "removed ghost" << id;
+            return json(200, QJsonObject{{QStringLiteral("removed"), QString::number(id)}});
+        }
+    }
+    if (what == QLatin1String("challenges") && parts.size() == 2 && m == "GET") {
+        return json(200, otgChallenges());
+    }
     if (what == QLatin1String("gamestates") && parts.size() == 2) {
         if (m == "GET") {
             return json(200, otgGameStates());
@@ -148,12 +222,39 @@ HttpResponse AdminService::route(const HttpRequest& request) {
     }
     if (what == QLatin1String("players") && parts.size() == 2 && m == "GET") {
         QJsonArray out;
-        for (const EgsPlayerInfo& p : egsPlayers()) {
-            out.append(QJsonObject{{QStringLiteral("account_id"), QString::number(p.accountId)},
-                                   {QStringLiteral("name"), p.name},
-                                   {QStringLiteral("logged_in"), p.loggedIn}});
+        for (const db::Player& p : db::players()) {
+            QJsonObject o{{QStringLiteral("account_id"), QString::number(p.accountId)},
+                          {QStringLiteral("name"), p.name},
+                          {QStringLiteral("logged_in"), p.loggedIn},
+                          {QStringLiteral("shadnet_account"), p.shadnetAccount},
+                          {QStringLiteral("first_seen"), double(p.firstSeen)},
+                          {QStringLiteral("last_seen"), double(p.lastSeen)}};
+            if (const auto f = db::fame(p.accountId)) {
+                o.insert(QStringLiteral("fame"), f->xp);
+                o.insert(QStringLiteral("fame_updated"), double(f->updated));
+                if (f->stars) {
+                    o.insert(QStringLiteral("stars"), *f->stars);
+                }
+                if (f->elite) {
+                    o.insert(QStringLiteral("elite"), *f->elite);
+                }
+            }
+            out.append(o);
         }
         return json(200, out);
+    }
+    if (what == QLatin1String("players") && parts.size() == 3 &&
+        parts[2] == QLatin1String("fame") && (m == "POST" || m == "PUT")) {
+        const QJsonObject o = QJsonDocument::fromJson(request.body).object();
+        const qint64 account = o.value(QStringLiteral("account_id")).toVariant().toLongLong();
+        const QJsonValue xpValue = o.value(QStringLiteral("xp"));
+        const qint64 xp = xpValue.toVariant().toLongLong();
+        if (account <= 0 || xpValue.isUndefined() || xp < 0) {
+            return error(400, QStringLiteral("account_id and xp (>= 0) are required"));
+        }
+        egsSetFame(account, xp);
+        return json(200, QJsonObject{{QStringLiteral("account_id"), QString::number(account)},
+                                     {QStringLiteral("fame"), xp}});
     }
     if (what == QLatin1String("requests") && parts.size() == 2 && m == "GET") {
         return requests(request.query.queryItemValue(QStringLiteral("after")).toULongLong());
@@ -208,7 +309,6 @@ HttpResponse AdminService::setEntry(const QString& board, const QByteArray& body
     if (!otgSetEntry(board, entrant, score, attachment)) {
         return error(400, QStringLiteral("cannot set entry"));
     }
-    // Optional display name, answered when the game asks profileService for this account.
     const QString name = o.value(QStringLiteral("name")).toString().trimmed();
     if (!name.isEmpty() && entrant.toLongLong() != 0) {
         egsSetPlayerName(entrant.toLongLong(), name);
@@ -222,6 +322,11 @@ HttpResponse AdminService::setEntry(const QString& board, const QByteArray& body
 HttpResponse AdminService::status() {
     const AuthConfig& auth = authConfig();
     const QList<RequestRecord> recent = recentRequests();
+    const QList<db::Ghost> ghosts = db::ghosts();
+    qint64 ghostBytes = 0;
+    for (const db::Ghost& g : ghosts) {
+        ghostBytes += g.size;
+    }
     return json(200,
                 QJsonObject{
                     {QStringLiteral("version"), Driveclub::Version()},
@@ -241,6 +346,8 @@ HttpResponse AdminService::status() {
                     {QStringLiteral("leaderboards"), qint64(otgBoardList().size())},
                     {QStringLiteral("database"), db::path()},
                     {QStringLiteral("players"), qint64(egsPlayers().size())},
+                    {QStringLiteral("ghosts"), qint64(ghosts.size())},
+                    {QStringLiteral("ghost_bytes"), double(ghostBytes)},
                     {QStringLiteral("requests"), recent.isEmpty() ? 0.0 : double(recent.last().id)},
                 });
 }
@@ -259,6 +366,7 @@ HttpResponse AdminService::sessions() {
             {QStringLiteral("created"), double(s.created)},
             {QStringLiteral("last_seen"), double(s.lastSeen)},
             {QStringLiteral("requests"), s.requests},
+            {QStringLiteral("transaction"), s.transaction},
         });
     }
     return json(200, out);
@@ -294,6 +402,7 @@ HttpResponse AdminService::requests(quint64 after) {
             {QStringLiteral("ms"), double(r.elapsedMs)},
             {QStringLiteral("bytes_in"), double(r.bytesIn)},
             {QStringLiteral("bytes_out"), double(r.bytesOut)},
+            {QStringLiteral("expected"), r.expected},
         });
     }
     return json(200, out);

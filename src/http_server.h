@@ -32,6 +32,10 @@ struct HttpResponse {
     // Extra headers, e.g. EGS's X-Response-Signature or X-Service-Error.
     QList<QPair<QByteArray, QByteArray>> headers;
     QByteArray body;
+    // An error status that is a normal part of the protocol
+    bool expected = false;
+    // An empty answer to a push-channel poll (/egs/messaging keepalive).
+    bool keepalive = false;
 };
 
 // Small HTTP/1.1 server: keep-alive, Content-Length and chunked request bodies.

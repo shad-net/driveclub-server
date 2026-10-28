@@ -6,6 +6,7 @@
 #include "auth.h"
 #include "database.h"
 #include "egs.pb.h"
+#include "otg.h"
 
 #include <google/protobuf/descriptor.pb.h>
 #include <google/protobuf/dynamic_message.h>
@@ -50,6 +51,8 @@ struct Session {
     qint64 created = 0;
     qint64 lastSeen = 0;
     int requests = 0;
+    QString transaction;
+    qint64 transactionCounter = 1000;
 };
 
 struct Sessions {
@@ -62,7 +65,8 @@ Sessions& sessions() {
     return s;
 }
 
-// Players
+// Players (account id -> name)
+
 void rememberPlayer(qint64 accountId, const QString& name, bool loggedIn,
                     const QString& shadnetAccount = {}) {
     db::Player p;
@@ -80,7 +84,6 @@ qint32 accountIdFor(const QString& name) {
     return static_cast<qint32>(v & 0x7fffffff) | 1;
 }
 
-// protobuf returns std::string in older releases and std::string_view in newer ones.
 QString qs(std::string_view s) {
     return QString::fromUtf8(s.data(), static_cast<qsizetype>(s.size()));
 }
@@ -147,6 +150,7 @@ void login(Context& ctx, const OAuthLoginRequest& req, OAuthLoginResponse& resp)
     s.lastSeen = s.created;
     {
         QMutexLocker lock(&sessions().mutex);
+        // One session per player: drop the old key.
         for (auto it = sessions().byKey.begin(); it != sessions().byKey.end();) {
             if (it->name == name) {
                 db::removeSession(it->key);
@@ -185,6 +189,9 @@ void minimalProfiles(Context&, const GetMinimalProfilesRequest& req,
         p->set_accountid(id);
         const QString name = egsPlayerName(id);
         p->set_name(name.toStdString());
+        if (const auto f = db::fame(id)) {
+            p->mutable_accountprogression()->set_xp(f->xp);
+        }
         names << QStringLiteral("%1=%2").arg(id).arg(name);
     }
     qCInfo(lcEgs).noquote() << "profiles for" << req.accounts_size()
@@ -223,13 +230,172 @@ void friends(Context& ctx, const GetFriendsRequest&, GetFriendsResponse& resp) {
         }
         FriendAccount* a = resp.add_friends()->mutable_account();
         a->set_id(p.accountId);
-        a->set_lastseen(0);
+        a->set_lastseen(0); // unit unknown (seconds or ms); 0 = not seen
         a->set_name(p.name.toStdString());
         names << p.name;
     }
     qCInfo(lcEgs).noquote() << "friends of" << (me.isEmpty() ? QStringLiteral("?") : me) << "->"
                             << names.size()
                             << (names.isEmpty() ? QString() : names.join(QStringLiteral(", ")));
+}
+
+// systemService.getTimeInfo, transactionService
+
+void timeInfo(Context&, const Empty&, GetTimeInfoResponse& resp) {
+    resp.set_timestamp(QDateTime::currentMSecsSinceEpoch());
+}
+
+Session* sessionOf(const Context& ctx) {
+    auto it = sessions().byKey.find(ctx.sessionKey);
+    return it == sessions().byKey.end() ? nullptr : &*it;
+}
+
+std::function<void(Context&, const TransactionRequest&, TransactionResponse&)> transactionCall(
+    const char* method, bool startNew) {
+    return
+        [method, startNew](Context& ctx, const TransactionRequest& req, TransactionResponse& resp) {
+            QMutexLocker lock(&sessions().mutex);
+            Session* s = sessionOf(ctx);
+            if (!s) {
+                resp.set_currenttransactionid("0");
+                return;
+            }
+            const QString before = s->transaction;
+            if (startNew || s->transaction.isEmpty()) {
+                s->transaction = QString::number(++s->transactionCounter);
+            }
+            resp.set_currenttransactionid(s->transaction.toStdString());
+            qCInfo(lcEgs).noquote()
+                << "transaction" << method << "for" << s->name
+                << (req.has_currenttransactionid()
+                        ? QStringLiteral("(completes %1)").arg(qs(req.currenttransactionid()))
+                        : QString())
+                << "->" << s->transaction
+                << (before == s->transaction ? QString() : QStringLiteral("(new)"));
+        };
+}
+
+// profileService: fame
+
+qint64 sessionAccount(const Context& ctx, QString* name = nullptr) {
+    QMutexLocker lock(&sessions().mutex);
+    const Session* s = sessionOf(ctx);
+    if (name && s) {
+        *name = s->name;
+    }
+    return s ? s->accountId : 0;
+}
+
+void getFame(Context& ctx, const Empty&, GetFameResponse& resp) {
+    QString name;
+    const qint64 account = sessionAccount(ctx, &name);
+    const std::optional<db::Fame> found = account ? db::fame(account) : std::nullopt;
+    const db::Fame f = found.value_or(db::Fame{});
+    FameAccountProgression* a = resp.mutable_accountprogression();
+    a->set_xp(f.xp);
+    a->set_serverxp(0);
+    if (f.stars) {
+        a->set_stars(*f.stars);
+    }
+    if (f.elite) {
+        a->set_elite(*f.elite);
+    }
+    resp.mutable_clubprogression()->set_xp(0); // clubs are not implemented yet
+    qCInfo(lcEgs).noquote() << "fame of" << (name.isEmpty() ? QStringLiteral("?") : name) << "->"
+                            << (found ? QString::number(f.xp) : QStringLiteral("none stored (0)"));
+}
+
+void updateFame(Context& ctx, const UpdateFameRequest& req, UpdateFameResponse& resp) {
+    QString name;
+    const qint64 account = sessionAccount(ctx, &name);
+    db::Fame f =
+        (account ? db::fame(account) : std::nullopt).value_or(db::Fame{account, 0, {}, {}, 0});
+    const qint64 sent = req.playertotalclientfame();
+    if (account != 0) {
+        f.xp = std::max(f.xp, sent);
+        if (req.has_stars()) {
+            f.stars = req.stars();
+        }
+        if (req.has_elite()) {
+            f.elite = req.elite();
+        }
+        f.updated = QDateTime::currentMSecsSinceEpoch();
+        db::putFame(f);
+        const QString entrant = QString::number(account);
+        const quint64 score = (quint64(2) << 60) | quint64(f.xp);
+        const auto old = db::score(QStringLiteral("fame/player"), entrant);
+        if (!old || old->score < score) {
+            db::putScore({QStringLiteral("fame/player"), entrant, score, {}, f.updated});
+        }
+    }
+    FameAfter* after = resp.mutable_accountprogression()->mutable_after();
+    after->set_xp(f.xp);
+    after->set_serverxp(0);
+    resp.mutable_clubprogression()->mutable_after()->set_xp(0);
+    qCInfo(lcEgs).noquote()
+        << "fame update from" << (name.isEmpty() ? QStringLiteral("?") : name) << "total" << sent
+        << "-> stored" << f.xp
+        << (req.clubfamedelta() > 0
+                ? QStringLiteral("(club delta %1 ignored: no clubs yet)").arg(req.clubfamedelta())
+                : QString())
+        << "transaction" << qs(req.transactionid());
+}
+
+// storageService: ghosts
+
+QString bobChecksum(const QByteArray& data) {
+    return QString::fromLatin1(QCryptographicHash::hash(data, QCryptographicHash::Md5).toBase64());
+}
+
+void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& resp) {
+    QString name;
+    const qint64 account = sessionAccount(ctx, &name);
+    const QByteArray data(req.body().data(), static_cast<qsizetype>(req.body().size()));
+    const QString sent = qs(req.checksum());
+    const QString actual = bobChecksum(data);
+    if (!sent.isEmpty() && sent != actual) {
+        // Stored anyway, with the checksum we computed: the game checks downloads against it.
+        qCWarning(lcEgs).noquote()
+            << "ghost from" << name << "has checksum" << sent << "but the data gives" << actual;
+    }
+    if (req.has_contentlength() && req.contentlength() != data.size()) {
+        qCWarning(lcEgs).noquote() << "ghost from" << name << "says" << req.contentlength()
+                                   << "bytes but has" << data.size();
+    }
+    db::Ghost g;
+    g.accountId = account;
+    g.mimeType = qs(req.mimetype());
+    g.checksum = actual;
+    const qint64 id = data.isEmpty() ? 0 : db::putGhost(g, data);
+    if (id == 0) {
+        ctx.status = 500; // the game marks the upload failed (0x41B6E0) and races on
+        qCWarning(lcEgs).noquote()
+            << "ghost from" << name << "not stored (" << data.size() << "bytes)";
+        return;
+    }
+    const QString url = otgBaseUrl(ctx.request) + QStringLiteral("/ghosts/%1").arg(id);
+    resp.set_id(id);
+    BobFileDetails* f = resp.mutable_filedetails();
+    f->set_id(id);
+    f->set_publicurl(url.toStdString());
+    f->set_checksum(actual.toStdString());
+    qCInfo(lcEgs).noquote() << "ghost" << id << "uploaded by" << name << "," << data.size()
+                            << "bytes, type" << req.objecttype() << "access" << req.accesstype();
+}
+
+void getRemoteUrl(Context& ctx, const GetRemoteUrlRequest& req, GetRemoteUrlResponse& resp) {
+    const auto g = db::ghost(req.id());
+    if (!g) {
+        ctx.status = 500;
+        qCWarning(lcEgs).noquote() << "getRemoteUrl for unknown ghost" << req.id();
+        return;
+    }
+    const QString url = otgBaseUrl(ctx.request) + QStringLiteral("/ghosts/%1").arg(g->id);
+    resp.set_id(g->id);
+    resp.set_publicurl(url.toStdString());
+    resp.set_checksum(g->checksum.toStdString());
+    qCInfo(lcEgs).noquote() << "ghost" << g->id << "of" << egsPlayerName(g->accountId) << "->"
+                            << url;
 }
 
 const QList<Endpoint>& endpoints() {
@@ -261,6 +427,29 @@ const QList<Endpoint>& endpoints() {
             "profileService", "getAggregatedProfiles", false, true, aggregatedProfiles),
         endpoint<GetFriendsRequest, GetFriendsResponse>("friendsListService", "getFriends", false,
                                                         true, friends),
+        endpoint<Empty, GetTimeInfoResponse>("systemService", "getTimeInfo", false, true, timeInfo),
+        endpoint<TransactionRequest, TransactionResponse>("transactionService", "newTransaction",
+                                                          false, true,
+                                                          transactionCall("newTransaction", true)),
+        endpoint<TransactionRequest, TransactionResponse>(
+            "transactionService", "getCurrentTransaction", false, true,
+            transactionCall("getCurrentTransaction", false)),
+        endpoint<TransactionRequest, TransactionResponse>(
+            "transactionService", "completeTransaction", false, true,
+            transactionCall("completeTransaction", false)),
+        endpoint<TransactionRequest, TransactionResponse>(
+            "transactionService", "completeAndGetNewTransaction", false, true,
+            transactionCall("completeAndGetNewTransaction", true)),
+        endpoint<TransactionRequest, TransactionResponse>(
+            "transactionService", "cancelCurrentTransaction", false, true,
+            transactionCall("cancelCurrentTransaction", true)),
+        endpoint<Empty, GetFameResponse>("profileService", "getFame", false, true, getFame),
+        endpoint<UpdateFameRequest, UpdateFameResponse>("profileService", "updateFameInTransaction",
+                                                        false, true, updateFame),
+        endpoint<CreateBobRequest, CreateBobResponse>("storageService", "createBob", false, true,
+                                                      createBob),
+        endpoint<GetRemoteUrlRequest, GetRemoteUrlResponse>("storageService", "getRemoteUrl", false,
+                                                            true, getRemoteUrl),
     };
     return list;
 }
@@ -396,7 +585,6 @@ void copyMessage24(const gp::DescriptorProto& in, gp::DescriptorProto* out) {
 
 QByteArray egsDescriptor() {
     static const QByteArray d = [] {
-        // Built from the compiled egs.proto, reduced to protobuf 2.4.1 descriptor fields.
         gp::FileDescriptorProto full;
         SvcEndpointDescriptorList::descriptor()->file()->CopyTo(&full);
         gp::FileDescriptorProto file;
@@ -429,6 +617,18 @@ QString egsDescribeBody(const QString& path, bool response, int status, const QB
     if (!msg->ParseFromArray(body.constData(), static_cast<int>(body.size()))) {
         return QStringLiteral("(does not parse as %1)").arg(qs(type->name()));
     }
+    const gp::Reflection* reflection = msg->GetReflection();
+    for (int i = 0; i < type->field_count(); ++i) {
+        const gp::FieldDescriptor* field = type->field(i);
+        if (field->type() == gp::FieldDescriptor::TYPE_BYTES && !field->is_repeated() &&
+            reflection->HasField(*msg, field)) {
+            const std::string value = reflection->GetString(*msg, field);
+            if (value.size() > 64) {
+                reflection->SetString(msg.get(), field,
+                                      "<" + std::to_string(value.size()) + " bytes, not shown>");
+            }
+        }
+    }
     std::string text;
     gp::TextFormat::Printer printer;
     printer.SetUseUtf8StringEscaping(true);
@@ -444,7 +644,9 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
                const HttpServer::Responder& respond) {
     if (endpoint == QLatin1String("egs/messaging")) {
         HttpResponse r;
-        r.contentType = "application/octet-stream";
+        r.contentType = "text/xml";
+        r.body = "<msg t=\"Empty\" s=\"0\"></msg>";
+        r.keepalive = true; // counted in the trace, not logged one by one
         respond(r);
         return true;
     }
@@ -470,6 +672,7 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
         respond(r);
         return true;
     }
+
     auto run = [e, service, method, sessionKey, respond](const HttpRequest& req,
                                                          const AuthResult& auth) {
         Context ctx{req, sessionKey, {}, 200, auth};
@@ -560,12 +763,27 @@ void egsRestoreSessions() {
     }
 }
 
+void egsSetFame(qint64 accountId, qint64 xp) {
+    db::Fame f = db::fame(accountId).value_or(db::Fame{accountId, 0, {}, {}, 0});
+    f.accountId = accountId;
+    f.xp = std::max<qint64>(0, xp);
+    f.updated = QDateTime::currentMSecsSinceEpoch();
+    db::putFame(f);
+    db::putScore({QStringLiteral("fame/player"),
+                  QString::number(accountId),
+                  (quint64(2) << 60) | quint64(f.xp),
+                  {},
+                  f.updated});
+    qCInfo(lcEgs).noquote() << "fame of" << egsPlayerName(accountId) << "set to" << f.xp
+                            << "(admin)";
+}
+
 QList<EgsSessionInfo> egsSessions() {
     QMutexLocker lock(&sessions().mutex);
     QList<EgsSessionInfo> out;
     for (const Session& s : sessions().byKey) {
         out.append({QString::fromLatin1(s.key), s.name, s.accountId, s.shadnetAccount,
-                    s.clientVersion, s.psPlus, s.created, s.lastSeen, s.requests});
+                    s.clientVersion, s.psPlus, s.created, s.lastSeen, s.requests, s.transaction});
     }
     return out;
 }

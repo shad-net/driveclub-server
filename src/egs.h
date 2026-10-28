@@ -11,13 +11,9 @@
 
 #include <optional>
 
-// EGS ("Evolution Game Services") over https://<gmServer>/egs/binary/<service>/<method>.
-
 constexpr char EgsKey[] = "ca91f51f-a7f5-4b95-814a-5796cfff586c";
 
 struct EgsConfig {
-    // Copied once by the game after the first getVersion; every OTG_Service_* TSS value must
-    // contain it for OTG features to switch on.
     QString serverIdentifier = QStringLiteral("dc-community");
     QString version = QStringLiteral("1");
 };
@@ -42,11 +38,11 @@ struct EgsSessionInfo {
     qint64 created = 0;  // ms since epoch
     qint64 lastSeen = 0; // ms since epoch
     int requests = 0;
+    QString transaction; // current transactionService id, empty = none yet
 };
 QList<EgsSessionInfo> egsSessions();
 bool egsDropSession(const QString& key);
 void egsRestoreSessions();
-
 struct EgsPlayerInfo {
     qint64 accountId = 0;
     QString name;
@@ -55,5 +51,6 @@ struct EgsPlayerInfo {
 QList<EgsPlayerInfo> egsPlayers();
 void egsSetPlayerName(qint64 accountId, const QString& name);
 QString egsPlayerName(qint64 accountId);
+void egsSetFame(qint64 accountId, qint64 xp);
 bool handleEgs(const HttpRequest& request, const QString& endpoint,
                const HttpServer::Responder& respond);

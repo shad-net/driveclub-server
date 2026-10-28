@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <QByteArray>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QList>
@@ -11,14 +12,12 @@
 #include <optional>
 
 namespace db {
-
-// Opens (creating when needed) the database and brings its schema up to date.
 bool open(const QString& path, QString* error);
 QString path();
-// Deletes sessions and tokens not used for maxAgeDays.
 void prune(int maxAgeDays);
 
 // Players
+
 struct Player {
     qint64 accountId = 0;
     QString name;
@@ -27,12 +26,14 @@ struct Player {
     qint64 firstSeen = 0;   // ms since epoch
     qint64 lastSeen = 0;
 };
+
 void putPlayer(const Player& player);
 std::optional<Player> player(qint64 accountId);
 std::optional<Player> playerByName(const QString& name); // case-insensitive
 QList<Player> players();
 
 // Leaderboards
+
 struct Score {
     QString board;
     QString entrant;
@@ -40,13 +41,13 @@ struct Score {
     QJsonArray attachment;
     qint64 updated = 0;
 };
-// Best first.
 QList<Score> boardScores(const QString& board);
 qsizetype boardSize(const QString& board);
 std::optional<Score> score(const QString& board, const QString& entrant);
 bool putScore(const Score& score); // insert or replace
 bool removeScore(const QString& board, const QString& entrant);
 bool clearBoard(const QString& board);
+QList<Score> scoresWithGhosts();
 
 struct BoardInfo {
     QString name;
@@ -57,6 +58,7 @@ struct BoardInfo {
 QList<BoardInfo> boards();
 
 // EGS sessions
+
 struct Session {
     QByteArray key;
     qint32 accountId = 0;
@@ -88,15 +90,46 @@ void removeToken(const QString& token);
 QList<Token> tokens();
 
 // OTG counter gamestates
+
 struct GameState {
     QString resource;
     qint64 version = 0;
-    QJsonObject counts; // name to integer
+    QJsonObject counts; // name -> integer
     qint64 updated = 0;
 };
 std::optional<GameState> gameState(const QString& resource);
 bool putGameState(const GameState& state);
 bool removeGameState(const QString& resource);
 QList<GameState> gameStates();
+
+// Fame
+
+struct Fame {
+    qint64 accountId = 0;
+    qint64 xp = 0;
+    std::optional<qint64> stars;
+    std::optional<qint64> elite;
+    qint64 updated = 0;
+};
+std::optional<Fame> fame(qint64 accountId);
+bool putFame(const Fame& fame);
+
+// Ghosts
+
+struct Ghost {
+    qint64 id = 0;
+    qint64 accountId = 0;
+    QString mimeType;
+    QString checksum;
+    qint64 size = 0;
+    qint64 created = 0;
+    int downloads = 0;
+    qint64 lastDownload = 0;
+};
+qint64 putGhost(const Ghost& ghost, const QByteArray& data);
+std::optional<Ghost> ghost(qint64 id, QByteArray* data = nullptr);
+void countGhostDownload(qint64 id);
+bool removeGhost(qint64 id);
+QList<Ghost> ghosts();
 
 } // namespace db
