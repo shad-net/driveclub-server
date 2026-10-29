@@ -178,9 +178,12 @@ message FameClubProgression {
   optional int64 xp = 1;
 }
 
+// The game's parser also reads stars and elite at the top level (seen in its getFame parser).
 message GetFameResponse {
   optional FameAccountProgression accountProgression = 1;
   optional FameClubProgression clubProgression = 2;
+  optional int64 stars = 3;
+  optional int64 elite = 4;
 }
 
 message UpdateFameRequest {
@@ -253,4 +256,296 @@ message GetRemoteUrlResponse {
   optional int64 id = 1;
   optional string publicUrl = 2;
   optional string checksum = 3;
+}
+
+// configurationService.getGlobalGameConfiguration (field names from the game's parser; all optional)
+
+message TelemetryConfig {
+  optional string destinationRoot = 1;
+  optional string environment = 2;
+  optional string messageServer = 3;
+  optional string password = 4;
+  optional string port = 5;
+  optional string username = 6;
+  optional string virtualHost = 7;
+  repeated string enabledMessages = 8;
+}
+
+message UiConfig {
+  optional bool enableButtonChallenge = 1;
+  optional bool enableButtonChallengeCreate = 2;
+  optional bool enableButtonDrive = 3;
+  optional bool enableButtonMultiPlayer = 4;
+  optional bool enableButtonSingleEvent = 5;
+  optional bool enableButtonTour = 6;
+  optional bool enableButtonFacebook = 7;
+  optional bool betaIsActive = 8;
+}
+
+message GameConfiguration {
+  optional TelemetryConfig telemetry = 1;
+  optional UiConfig uiConfig = 2;
+}
+
+message GlobalGameConfiguration {
+  optional GameConfiguration configuration = 1;
+}
+
+// Field names and types below come from the game's request builders and response parsers.
+
+enum GenericEnum {
+  GENERIC_0 = 0;
+  GENERIC_1 = 1;
+  GENERIC_2 = 2;
+  GENERIC_3 = 3;
+  GENERIC_4 = 4;
+  GENERIC_5 = 5;
+}
+
+message IdOnly {
+  optional int64 id = 1;
+}
+
+// accountService.quickSearch
+message QuickSearchRequest {
+  optional string startsWith = 1;
+  optional GenericEnum orderBy = 2;
+  optional int32 maximumEntries = 3;
+}
+
+message QuickSearchResponse {
+  repeated IdOnly accounts = 1;
+}
+
+// statsService.getAccountStats
+message GetAccountStatsRequest {
+  optional string columnDefinitionSetName = 1;
+  optional bool currentAccount = 2;
+  repeated IdOnly accounts = 3;
+  optional bool currentClub = 4;
+  repeated IdOnly clubs = 5;
+}
+
+message StatDefinition {
+  optional string name = 1;
+  repeated string columns = 2;
+}
+
+message StatEntry {
+  repeated string columns = 1;
+}
+
+message AccountStat {
+  optional int32 total = 1;
+  optional StatDefinition definition = 2;
+  repeated StatEntry entries = 3;
+}
+
+message GetAccountStatsResponse {
+  repeated AccountStat stats = 1;
+}
+
+// activityService.getActivityFeed
+message GetActivityFeedRequest {
+  optional GenericEnum feedType = 1;
+  optional int64 feedId = 2;
+  optional string language = 3;
+  optional int64 maxVersion = 4;
+  optional int32 maximumEntries = 5;
+}
+
+message ActivityEntry {
+  optional int64 id = 1;
+  optional int64 version = 2;
+  optional int64 createdBy = 3;
+  optional GenericEnum authorType = 4;
+  optional GenericEnum verb = 5;
+  optional GenericEnum subjectType = 6;
+  optional int64 club = 7;
+  optional int64 createdByClub = 8;
+  optional int64 subjectId = 9;
+  optional string createdOn = 10;
+  optional float globalRelevance = 11;
+  optional string localizedActivityText = 12;
+  optional string localizedElapsedTimeText = 13;
+}
+
+message GetActivityFeedResponse {
+  repeated ActivityEntry entries = 1;
+  repeated IdOnly clubs = 2;
+}
+
+// matchingService (MatchingComponent): interest in an event, match slots, ready state.
+message MatchingRequest {
+  optional int64 id = 1;
+  repeated int64 eligiblePartyMembers = 2;
+  optional int64 matchSlotId = 3;
+  repeated int64 slotIds = 4;
+  repeated int64 eventLists = 5;
+}
+
+message MatchSlotRef {
+  optional int64 id = 1;
+}
+
+message RegisterInterestResponse {
+  optional bool registered = 1;
+  optional MatchSlotRef slot = 2;
+}
+
+message MarkReadyResponse {
+  optional int64 id = 1;
+  optional bool ready = 2;
+}
+
+message MatchSlotInfo {
+  optional int64 slotId = 1;
+  optional int32 players = 2;
+  optional int32 friendsAndClubMates = 3;
+}
+
+message QueryMatchSlotsResponse {
+  repeated MatchSlotInfo slots = 1;
+}
+
+message EventListActivity {
+  optional int64 eventList = 1;
+  optional int32 players = 2;
+}
+
+message QueryEventListActivityResponse {
+  repeated EventListActivity activity = 1;
+}
+
+// lobbyService (private lobbies). The game reads and writes these by field name through the
+// descriptor above, so names and types matter, numbers do not. Types follow the game's accessors
+// ("is not of Enum/Int64/Bool/Bytes type"); enum values are numbered as the game compares them,
+// their meaning is mostly unknown yet.
+
+enum LobbyType {
+  LOBBY_TYPE_0 = 0;
+  LOBBY_TYPE_1 = 1;
+  LOBBY_TYPE_2 = 2;
+  LOBBY_TYPE_3 = 3;
+  LOBBY_TYPE_4 = 4;
+}
+
+enum LobbyStatus {
+  LOBBY_STATUS_0 = 0;
+  LOBBY_STATUS_1 = 1;
+  LOBBY_STATUS_2 = 2;
+  LOBBY_STATUS_3 = 3;
+  LOBBY_STATUS_4 = 4;
+  LOBBY_STATUS_5 = 5;
+  LOBBY_STATUS_6 = 6;
+  LOBBY_STATUS_7 = 7;
+  LOBBY_STATUS_8 = 8;
+  LOBBY_STATUS_9 = 9;
+  LOBBY_STATUS_10 = 10;
+}
+
+enum LobbyAction {
+  LOBBY_ACTION_0 = 0;
+  LOBBY_ACTION_1 = 1;
+  LOBBY_ACTION_2 = 2;
+  LOBBY_ACTION_3 = 3;
+  LOBBY_ACTION_4 = 4;
+  LOBBY_ACTION_5 = 5;
+  LOBBY_ACTION_6 = 6;
+  LOBBY_ACTION_7 = 7;
+  LOBBY_ACTION_8 = 8;
+  LOBBY_ACTION_9 = 9;
+  LOBBY_ACTION_10 = 10;
+  LOBBY_ACTION_11 = 11;
+  LOBBY_ACTION_12 = 12;
+  LOBBY_ACTION_13 = 13;
+  LOBBY_ACTION_14 = 14;
+  LOBBY_ACTION_15 = 15;
+  LOBBY_ACTION_16 = 16;
+}
+
+enum LobbyJoinType {
+  LOBBY_JOIN_TYPE_0 = 0;
+  LOBBY_JOIN_TYPE_1 = 1;
+  LOBBY_JOIN_TYPE_2 = 2;
+  LOBBY_JOIN_TYPE_3 = 3;
+}
+
+message LobbySessionKey {
+  optional string id = 1;
+  optional int64 accountId = 2;
+  optional string username = 3;
+  optional bytes contentRestriction = 4;
+}
+
+message LobbyMember {
+  optional LobbySessionKey sessionKey = 1;
+  optional bool host = 2;
+  optional bytes contentRestriction = 3;
+  optional int32 team = 4;
+  optional int32 playerNumber = 5;
+  optional bytes memberData = 6;
+  optional string clientVersion = 7;
+  optional bool aiControlled = 8;
+  optional int64 accountId = 9;
+}
+
+message Lobby {
+  optional string id = 1;
+  optional LobbyType lobbyType = 2;
+  optional LobbyStatus status = 3;
+  optional string name = 4;
+  optional int64 matchSlotId = 5;
+  optional int64 eventListId = 6;
+  repeated LobbyMember membersList = 7;
+}
+
+message LobbyList {
+  repeated Lobby lobbies = 1;
+  repeated LobbyMember notRemoved = 2;
+  repeated LobbyResult results = 3;
+}
+
+// lobbyService.joinLobby (the private lobby game's room join, guest 0x800464fac); the game parses the
+// answer as a dictionary and wants 'id', 'lobbyType', 'status' and 'membersList' in the lobby.
+message JoinLobbyResponse {
+  optional Lobby lobby = 1;
+  repeated Lobby lobbies = 2;
+}
+
+message LobbyResult {
+  repeated LobbyMember notRemoved = 1;
+  optional string lobbyId = 2;
+}
+
+message LobbyAccount {
+  optional int64 id = 1;
+  optional string name = 2;
+}
+
+message LobbyJoinDetails {
+  optional LobbySessionKey sessionKey = 1;
+  optional bytes contentRestriction = 2;
+  optional int64 accountId = 3;
+}
+
+// One request type for every lobbyService method: each only sets the fields it needs.
+message LobbyRequest {
+  optional LobbyJoinType type = 1;
+  optional LobbyAccount accountToJoin = 2;
+  optional LobbyJoinDetails extraJoinDetails = 3;
+  optional Lobby lobby = 4;
+  optional LobbyMember member = 5;
+  optional string lobbyId = 6;
+  optional bool migrateIfPartyLeader = 7;
+  optional LobbyMember newHost = 8;
+  repeated LobbyMember members = 9;
+}
+
+message LobbyCallbackMessage {
+  optional LobbyAction action = 1;
+  optional Lobby lobby = 2;
+  optional int64 oldMatchSlotId = 3;
+  repeated LobbyMember updatedMembers = 4;
+  optional LobbyMember newHost = 5;
 }

@@ -24,6 +24,7 @@ struct HttpRequest {
     QHash<QByteArray, QByteArray> headers;
     QByteArray body;
     QHostAddress peer;
+    QHostAddress local; // this server's address on the connection (LAN or VPN address)
 };
 
 struct HttpResponse {
@@ -36,6 +37,10 @@ struct HttpResponse {
     bool expected = false;
     // An empty answer to a push-channel poll (/egs/messaging keepalive).
     bool keepalive = false;
+    // Set for a response that stays open (EGS messaging): the server sends the head with chunked
+    // transfer encoding and `body` as the first chunk, then calls this with a writer for later
+    // chunks. The writer returns false once the connection is gone; the connection is not reused.
+    std::function<void(std::function<bool(const QByteArray&)>)> stream;
 };
 
 // Small HTTP/1.1 server: keep-alive, Content-Length and chunked request bodies.

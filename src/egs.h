@@ -54,3 +54,6 @@ QString egsPlayerName(qint64 accountId);
 void egsSetFame(qint64 accountId, qint64 xp);
 bool handleEgs(const HttpRequest& request, const QString& endpoint,
                const HttpServer::Responder& respond);
+
+// A private lobby invitation went from `from` to `to`: put `to` into the inviter's lobby and push it.
+void egsLobbyInvitation(const QString& from, const QString& to);

@@ -274,6 +274,7 @@ void HttpServer::processNext(QTcpSocket* socket) {
     socket->setProperty("busy", true);
     socket->setProperty("requests", socket->property("requests").toInt() + 1);
     parsed.request.peer = socket->peerAddress();
+    parsed.request.local = socket->localAddress();
 
     QPointer<QTcpSocket> guard(socket);
     const bool keepAlive = parsed.keepAlive;
@@ -286,7 +287,7 @@ void HttpServer::processNext(QTcpSocket* socket) {
             guard->setProperty("keepalives", guard->property("keepalives").toInt() + 1);
         }
         send(guard, response, keepAlive);
-        if (keepAlive) {
+        if (keepAlive && !response.stream) {
             QMetaObject::invokeMethod(
                 this,
                 [this, guard] {
@@ -299,6 +300,36 @@ void HttpServer::processNext(QTcpSocket* socket) {
 }
 
 void HttpServer::send(QTcpSocket* socket, const HttpResponse& response, bool keepAlive) {
+    if (response.stream) {
+        QByteArray head = "HTTP/1.1 " + QByteArray::number(response.status) + ' ' +
+                          reasonPhrase(response.status) + "\r\n";
+        head += "Content-Type: " + response.contentType + "\r\n";
+        head += "Transfer-Encoding: chunked\r\n";
+        for (const auto& [key, value] : response.headers) {
+            head += key + ": " + value + "\r\n";
+        }
+        head += "Connection: close\r\n\r\n";
+        socket->write(head);
+        // The stream is the connection's last response and is quiet on the client side.
+        socket->setProperty("busy", true);
+        socket->setProperty("closing", true);
+        if (auto* idle = qobject_cast<QTimer*>(socket->property("idleTimer").value<QObject*>())) {
+            idle->stop();
+        }
+        QPointer<QTcpSocket> guard(socket);
+        const auto writer = [guard](const QByteArray& chunk) {
+            if (!guard || guard->state() != QAbstractSocket::ConnectedState) {
+                return false;
+            }
+            if (!chunk.isEmpty()) {
+                guard->write(QByteArray::number(chunk.size(), 16) + "\r\n" + chunk + "\r\n");
+            }
+            return true;
+        };
+        writer(response.body);
+        response.stream(writer);
+        return;
+    }
     QByteArray head = "HTTP/1.1 " + QByteArray::number(response.status) + ' ' +
                       reasonPhrase(response.status) + "\r\n";
     head += "Content-Type: " + response.contentType + "\r\n";
