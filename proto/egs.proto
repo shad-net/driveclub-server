@@ -597,3 +597,151 @@ message LobbyCallbackMessage {
   repeated LobbyMember updatedMembers = 4;
   optional LobbyMember newHost = 5;
 }
+
+// clubService. Field names and types from the game's builders and parsers. A club member of type
+// 2 is the owner; the game rejects a club without one ("Club has invalid members"). clubStatus 3-5
+// are skipped in club lists (disbanded and the like).
+
+message ClubRange {
+  optional int32 numberOfResults = 1;
+}
+
+message QueryClubsRequest {
+  repeated int64 accountIds = 1;
+  repeated int64 clubIds = 2;
+  optional ClubRange range = 3;
+  optional GenericEnum orderBy = 4;
+  repeated string clubNames = 5;
+  optional bool withProgression = 6;
+  optional bool withCustomization = 7;
+  optional bool withMembers = 8;
+  optional bool lookupRemoteUrl = 9;
+}
+
+message ClubLayer {
+  optional float scale = 1;
+  optional string image = 2;
+  repeated string colors = 3;
+}
+
+message ClubCustomization {
+  optional int64 id = 1;
+  optional string liveryDescriptor = 2;
+  optional string badgeBobUrl = 3;
+  optional string smallBadgeBobUrl = 4;
+  repeated ClubLayer layers = 5;
+  repeated string tags = 6;
+  optional int64 badgeBobId = 7;
+  optional int64 smallBadgeBobId = 8;
+}
+
+message ClubProgression {
+  optional int64 xp = 1;
+}
+
+message ClubMember {
+  optional bool online = 1;
+  optional int64 account = 2;
+  optional GenericEnum type = 3;
+  optional string createdOn = 4;
+  optional bool mvp = 5;
+}
+
+message Club {
+  optional int64 id = 1;
+  optional string name = 2;
+  optional string historicalName = 3;
+  optional GenericEnum membership = 4;
+  optional GenericEnum clubStatus = 5;
+  optional int32 size = 6;
+  optional string createdOn = 7;
+  repeated ClubMember clubMembers = 8;
+  optional ClubCustomization customization = 9;
+  optional ClubProgression progression = 10;
+}
+
+message QueryClubsResponse {
+  repeated Club clubs = 1;
+}
+
+message ClubQuickSearchRequest {
+  optional string startsWith = 1;
+  optional GenericEnum orderBy = 2;
+  optional int32 maximumEntries = 3;
+}
+
+message ClubQuickSearchResponse {
+  repeated IdOnly clubs = 1;
+}
+
+// createAndJoin, join, requestJoin, leave, rejectInvite, rejectJoinRequest, updateMembership:
+// each sends or reads only some of these.
+message ClubRequest {
+  optional int64 id = 1;
+  optional string name = 2;
+  optional GenericEnum membership = 3;
+}
+
+message ClubReply {
+  optional int64 id = 1;
+  optional GenericEnum membership = 2;
+}
+
+message ClubNameMessage {
+  optional string name = 1;
+}
+
+message ClubAccountsRequest {
+  optional IdOnly club = 1;
+  repeated IdOnly accounts = 2;
+}
+
+message FindClubInvitesRequest {
+  optional bool clubInviteIdsNullListField = 1;
+  repeated int64 clubIds = 2;
+  optional bool clubIdsNullListField = 3;
+  repeated int64 accountIds = 4;
+  optional bool accountIdsNullListField = 5;
+  optional bool invitedByNullListField = 6;
+  repeated GenericEnum status = 7;
+  optional bool statusNullListField = 8;
+  optional bool includeExpired = 9;
+  optional int32 maximumEntries = 10;
+}
+
+message ClubInvite {
+  optional GenericEnum status = 1;
+  optional int64 id = 2;
+  optional int64 club = 3;
+  optional int64 account = 4;
+  optional int64 invitedBy = 5;
+  optional string createdOn = 6;
+  optional string updatedOn = 7;
+  optional string expiresOn = 8;
+}
+
+message FindClubInvitesResponse {
+  repeated ClubInvite clubInvites = 1;
+}
+
+message UpdateCustomizationRequest {
+  optional bool lookupRemoteUrl = 1;
+  optional ClubCustomization customization = 2;
+}
+
+message UpdateCustomizationResponse {
+  repeated ClubCustomization customizations = 1;
+}
+
+// keywordService.getKeywords (club tags)
+message GetKeywordsRequest {
+  repeated string groupNames = 1;
+}
+
+message Keyword {
+  optional string name = 1;
+}
+
+message GetKeywordsResponse {
+  repeated Keyword keywords = 1;
+}

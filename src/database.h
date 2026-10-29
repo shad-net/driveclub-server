@@ -132,4 +132,43 @@ void countGhostDownload(qint64 id);
 bool removeGhost(qint64 id);
 QList<Ghost> ghosts();
 
+// Clubs
+
+struct Club {
+    qint64 id = 0;
+    QString name;
+    int membership = 0;        // as the game sent it when creating the club
+    QJsonObject customization; // badge layers, livery descriptor, tags
+    qint64 xp = 0;
+    qint64 created = 0;
+};
+qint64 createClub(const Club& club); // returns the new id, 0 on failure
+bool putClub(const Club& club);
+std::optional<Club> club(qint64 id);
+QList<Club> clubs();
+bool removeClub(qint64 id); // with its members and invites
+
+struct ClubMember {
+    qint64 accountId = 0;
+    qint64 clubId = 0;
+    int type = 1; // 2 = owner
+    qint64 joined = 0;
+};
+bool putClubMember(const ClubMember& member);
+bool removeClubMember(qint64 accountId);
+std::optional<ClubMember> clubMembership(qint64 accountId);
+QList<ClubMember> clubMembers(qint64 clubId);
+
+struct ClubInvite {
+    qint64 id = 0;
+    qint64 clubId = 0;
+    qint64 accountId = 0;
+    qint64 invitedBy = 0;
+    int status = 0; // 0 open, 1 accepted, 2 rejected
+    qint64 created = 0;
+    qint64 updated = 0;
+};
+qint64 putClubInvite(const ClubInvite& invite); // insert (id 0) or update; returns the id
+QList<ClubInvite> clubInvites();
+
 } // namespace db

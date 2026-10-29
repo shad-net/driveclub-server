@@ -22,6 +22,7 @@
 #include <QHash>
 #include <QList>
 #include <QLoggingCategory>
+#include <QTimeZone>
 #include <QTimer>
 
 #include <chrono>
@@ -200,6 +201,9 @@ void minimalProfiles(Context&, const GetMinimalProfilesRequest& req,
         if (const auto f = db::fame(id)) {
             p->mutable_accountprogression()->set_xp(f->xp);
         }
+        if (const auto m = db::clubMembership(id)) {
+            p->set_clubid(m->clubId);
+        }
         names << QStringLiteral("%1=%2").arg(id).arg(name);
     }
     qCInfo(lcEgs).noquote() << "profiles for" << req.accounts_size()
@@ -220,9 +224,13 @@ void aggregatedProfiles(Context&, const GetAggregatedProfilesRequest& req,
         if (!known) {
             id = accountIdFor(name);
         }
-        AccountRef* a = resp.add_profiles()->mutable_account();
+        AggregatedProfile* p = resp.add_profiles();
+        AccountRef* a = p->mutable_account();
         a->set_id(id);
         a->set_name(name.toStdString());
+        if (const auto m = db::clubMembership(id)) {
+            p->mutable_club()->set_id(m->clubId);
+        }
         found << QStringLiteral("%1=%2%3").arg(name).arg(id).arg(known ? QString()
                                                                        : QStringLiteral(" (new)"));
     }
@@ -858,6 +866,293 @@ void accountStats(Context& ctx, const GetAccountStatsRequest& req, GetAccountSta
                             << egsSessionName(ctx.sessionKey) << "-> no rows yet";
 }
 
+// clubService. Clubs live in the database; a player is in at most one club. The creator is the
+// owner (member type 2), others join as members (type 1). shortcut: join requests are granted at
+// once, invitations are stored but not pushed, club fame (xp) is not counted yet.
+
+constexpr int ClubOwner = 2;
+constexpr int ClubMemberType = 1;
+constexpr int ClubActive = 1;
+constexpr qsizetype ClubMaxMembers = 6;
+
+QString rfc3339(qint64 ms) {
+    return QDateTime::fromMSecsSinceEpoch(ms, QTimeZone::UTC)
+        .toString(QStringLiteral("yyyy-MM-ddTHH:mm:ss.zzzZ"));
+}
+
+bool accountOnline(qint64 accountId) {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (const EgsSessionInfo& s : egsSessions()) {
+        if (s.accountId == accountId && now - s.lastSeen < 2 * 60 * 1000) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void fillCustomization(const db::Club& c, ClubCustomization* out) {
+    const QJsonObject& j = c.customization;
+    out->set_id(c.id);
+    if (j.contains(QStringLiteral("liveryDescriptor"))) {
+        out->set_liverydescriptor(j.value(QStringLiteral("liveryDescriptor")).toString().toStdString());
+    }
+    for (const QJsonValue& v : j.value(QStringLiteral("layers")).toArray()) {
+        const QJsonObject l = v.toObject();
+        ClubLayer* layer = out->add_layers();
+        layer->set_scale(float(l.value(QStringLiteral("scale")).toDouble(1.0)));
+        layer->set_image(l.value(QStringLiteral("image")).toString().toStdString());
+        for (const QJsonValue& color : l.value(QStringLiteral("colors")).toArray()) {
+            layer->add_colors(color.toString().toStdString());
+        }
+    }
+    for (const QJsonValue& t : j.value(QStringLiteral("tags")).toArray()) {
+        out->add_tags(t.toString().toStdString());
+    }
+}
+
+void fillClub(const db::Club& c, ::Club* out) {
+    const QList<db::ClubMember> members = db::clubMembers(c.id);
+    out->set_id(c.id);
+    out->set_name(c.name.toStdString());
+    out->set_historicalname(c.name.toStdString());
+    out->set_membership(static_cast<GenericEnum>(c.membership));
+    out->set_clubstatus(static_cast<GenericEnum>(ClubActive));
+    out->set_size(int(members.size()));
+    out->set_createdon(rfc3339(c.created).toStdString());
+    for (const db::ClubMember& m : members) {
+        ClubMember* cm = out->add_clubmembers();
+        cm->set_account(m.accountId);
+        cm->set_online(accountOnline(m.accountId));
+        cm->set_type(static_cast<GenericEnum>(m.type));
+        cm->set_createdon(rfc3339(m.joined).toStdString());
+        cm->set_mvp(false);
+    }
+    fillCustomization(c, out->mutable_customization());
+    out->mutable_progression()->set_xp(c.xp);
+}
+
+// Takes a player out of their club; an owner hands the club to the longest member, the last one
+// out closes it.
+void leaveClub(qint64 accountId) {
+    const auto membership = db::clubMembership(accountId);
+    if (!membership) {
+        return;
+    }
+    db::removeClubMember(accountId);
+    const QList<db::ClubMember> rest = db::clubMembers(membership->clubId);
+    if (rest.isEmpty()) {
+        db::removeClub(membership->clubId);
+        qCInfo(lcEgs).noquote() << "club" << membership->clubId << "closed (last member left)";
+    } else if (membership->type == ClubOwner) {
+        db::ClubMember next = rest.first();
+        next.type = ClubOwner;
+        db::putClubMember(next);
+    }
+}
+
+bool joinClub(qint64 accountId, qint64 clubId, int type) {
+    const auto c = db::club(clubId);
+    if (!c || db::clubMembers(clubId).size() >= ClubMaxMembers) {
+        return false;
+    }
+    if (const auto current = db::clubMembership(accountId); current && current->clubId == clubId) {
+        return true;
+    }
+    leaveClub(accountId);
+    return db::putClubMember({accountId, clubId, type, 0});
+}
+
+void createClub(Context& ctx, const ClubRequest& req, ClubReply& resp) {
+    QString me;
+    const qint64 account = sessionAccount(ctx, &me);
+    const QString name = qs(req.name()).trimmed();
+    if (account == 0 || name.isEmpty()) {
+        ctx.status = 400;
+        return;
+    }
+    db::Club c;
+    c.name = name;
+    c.membership = req.membership();
+    c.created = QDateTime::currentMSecsSinceEpoch();
+    const qint64 id = db::createClub(c);
+    if (id == 0) {
+        ctx.status = 500;
+        return;
+    }
+    leaveClub(account);
+    db::putClubMember({account, id, ClubOwner, c.created});
+    resp.set_id(id);
+    qCInfo(lcEgs).noquote() << "club" << id << name << "created by" << me;
+}
+
+void sanitizeClubName(Context&, const ClubNameMessage& req, ClubNameMessage& resp) {
+    resp.set_name(qs(req.name()).simplified().left(32).toStdString());
+}
+
+void queryClubs(Context&, const QueryClubsRequest& req, QueryClubsResponse& resp) {
+    QList<qint64> ids;
+    for (const qint64 id : req.clubids()) {
+        ids << id;
+    }
+    for (const qint64 account : req.accountids()) {
+        if (const auto m = db::clubMembership(account)) {
+            ids << m->clubId;
+        }
+    }
+    const QList<db::Club> all = db::clubs();
+    for (const std::string& n : req.clubnames()) {
+        for (const db::Club& c : all) {
+            if (c.name.compare(qs(n), Qt::CaseInsensitive) == 0) {
+                ids << c.id;
+            }
+        }
+    }
+    const bool browse = req.clubids_size() == 0 && req.accountids_size() == 0 &&
+                        req.clubnames_size() == 0;
+    const int limit = req.range().numberofresults() > 0 ? req.range().numberofresults() : 50;
+    int added = 0;
+    for (const db::Club& c : all) {
+        if (added >= limit || (!browse && !ids.contains(c.id))) {
+            continue;
+        }
+        fillClub(c, resp.add_clubs());
+        ++added;
+    }
+    qCInfo(lcEgs).noquote() << "clubs query" << qs(req.ShortDebugString()) << "->" << added;
+}
+
+void quickSearchClubs(Context&, const ClubQuickSearchRequest& req, ClubQuickSearchResponse& resp) {
+    const QString prefix = qs(req.startswith());
+    const int limit = req.maximumentries() > 0 ? req.maximumentries() : 20;
+    for (const db::Club& c : db::clubs()) {
+        if (resp.clubs_size() < limit && c.name.startsWith(prefix, Qt::CaseInsensitive)) {
+            resp.add_clubs()->set_id(c.id);
+        }
+    }
+}
+
+void joinClubCall(Context& ctx, const ClubRequest& req, ClubReply& resp) {
+    QString me;
+    const qint64 account = sessionAccount(ctx, &me);
+    if (account == 0 || !joinClub(account, req.id(), ClubMemberType)) {
+        ctx.status = 400;
+        return;
+    }
+    resp.set_id(req.id());
+    qCInfo(lcEgs).noquote() << me << "joined club" << req.id();
+}
+
+void leaveClubCall(Context& ctx, const ClubRequest&, ClubReply& resp) {
+    QString me;
+    const qint64 account = sessionAccount(ctx, &me);
+    const auto m = db::clubMembership(account);
+    leaveClub(account);
+    if (m) {
+        resp.set_id(m->clubId);
+        qCInfo(lcEgs).noquote() << me << "left club" << m->clubId;
+    }
+}
+
+void inviteToClub(Context& ctx, const ClubAccountsRequest& req, Empty&) {
+    QString me;
+    const qint64 account = sessionAccount(ctx, &me);
+    for (const IdOnly& a : req.accounts()) {
+        db::ClubInvite i;
+        i.clubId = req.club().id();
+        i.accountId = a.id();
+        i.invitedBy = account;
+        db::putClubInvite(i);
+        qCInfo(lcEgs).noquote() << me << "invited" << egsPlayerName(a.id()) << "to club"
+                                << req.club().id();
+    }
+}
+
+void findClubInvites(Context& ctx, const FindClubInvitesRequest& req, FindClubInvitesResponse& resp) {
+    QList<qint64> accounts(req.accountids().begin(), req.accountids().end());
+    QList<qint64> clubs(req.clubids().begin(), req.clubids().end());
+    if (accounts.isEmpty() && clubs.isEmpty()) {
+        accounts << sessionAccount(ctx);
+    }
+    for (const db::ClubInvite& i : db::clubInvites()) {
+        if (i.status != 0 || !(accounts.contains(i.accountId) || clubs.contains(i.clubId)) ||
+            !db::club(i.clubId)) {
+            continue;
+        }
+        ClubInvite* out = resp.add_clubinvites();
+        out->set_status(static_cast<GenericEnum>(i.status));
+        out->set_id(i.id);
+        out->set_club(i.clubId);
+        out->set_account(i.accountId);
+        out->set_invitedby(i.invitedBy);
+        out->set_createdon(rfc3339(i.created).toStdString());
+        out->set_updatedon(rfc3339(i.updated).toStdString());
+        out->set_expireson(rfc3339(i.created + qint64(7) * 24 * 3600 * 1000).toStdString());
+    }
+}
+
+void rejectClubInvite(Context& ctx, const ClubRequest& req, Empty&) {
+    const qint64 account = sessionAccount(ctx);
+    for (db::ClubInvite i : db::clubInvites()) {
+        if (i.status == 0 && (i.id == req.id() || (i.clubId == req.id() && i.accountId == account))) {
+            i.status = 2;
+            db::putClubInvite(i);
+        }
+    }
+}
+
+void updateClubMembership(Context& ctx, const ClubRequest& req, ClubReply& resp) {
+    const auto m = db::clubMembership(sessionAccount(ctx));
+    const qint64 clubId = req.id() ? req.id() : (m ? m->clubId : 0);
+    auto c = db::club(clubId);
+    if (!c) {
+        ctx.status = 400;
+        return;
+    }
+    c->membership = req.membership();
+    db::putClub(*c);
+    resp.set_id(c->id);
+    resp.set_membership(req.membership());
+}
+
+void updateClubCustomization(Context& ctx, const UpdateCustomizationRequest& req,
+                             UpdateCustomizationResponse& resp) {
+    const auto m = db::clubMembership(sessionAccount(ctx));
+    const qint64 clubId = req.customization().id() ? req.customization().id()
+                                                   : (m ? m->clubId : 0);
+    auto c = db::club(clubId);
+    if (!c) {
+        ctx.status = 400;
+        return;
+    }
+    const ClubCustomization& in = req.customization();
+    QJsonObject& j = c->customization;
+    if (in.has_liverydescriptor()) {
+        j.insert(QStringLiteral("liveryDescriptor"), qs(in.liverydescriptor()));
+    }
+    if (in.layers_size() > 0) {
+        QJsonArray layers;
+        for (const ClubLayer& l : in.layers()) {
+            QJsonArray colors;
+            for (const std::string& color : l.colors()) {
+                colors.append(qs(color));
+            }
+            layers.append(QJsonObject{{QStringLiteral("scale"), double(l.scale())},
+                                      {QStringLiteral("image"), qs(l.image())},
+                                      {QStringLiteral("colors"), colors}});
+        }
+        j.insert(QStringLiteral("layers"), layers);
+    }
+    if (in.tags_size() > 0) {
+        QJsonArray tags;
+        for (const std::string& t : in.tags()) {
+            tags.append(qs(t));
+        }
+        j.insert(QStringLiteral("tags"), tags);
+    }
+    db::putClub(*c);
+    fillCustomization(*c, resp.add_customizations());
+}
+
 // sessionService.queryStatus: the asked accounts that have a session in use are online.
 void queryStatus(Context&, const QueryStatusRequest& req, QueryStatusResponse& resp) {
     constexpr qint64 OnlineWindowMs = 2 * 60 * 1000;
@@ -1035,6 +1330,29 @@ const QList<Endpoint>& endpoints() {
             "statsService", "getAccountStats", false, true, accountStats),
         endpoint<QueryStatusRequest, QueryStatusResponse>("sessionService", "queryStatus", false,
                                                           true, queryStatus),
+        endpoint<ClubRequest, ClubReply>("clubService", "createAndJoin", false, true, createClub),
+        endpoint<ClubNameMessage, ClubNameMessage>("clubService", "sanitize", false, true,
+                                                   sanitizeClubName),
+        endpoint<QueryClubsRequest, QueryClubsResponse>("clubService", "queryClubs", false, true,
+                                                        queryClubs),
+        endpoint<ClubQuickSearchRequest, ClubQuickSearchResponse>("clubService", "quickSearch",
+                                                                  false, true, quickSearchClubs),
+        endpoint<ClubRequest, ClubReply>("clubService", "join", false, true, joinClubCall),
+        endpoint<ClubRequest, ClubReply>("clubService", "requestJoin", false, true, joinClubCall),
+        endpoint<ClubRequest, ClubReply>("clubService", "leave", false, true, leaveClubCall),
+        endpoint<ClubAccountsRequest, Empty>("clubService", "invite", false, true, inviteToClub),
+        endpoint<FindClubInvitesRequest, FindClubInvitesResponse>("clubService", "findInvites",
+                                                                  false, true, findClubInvites),
+        endpoint<ClubRequest, Empty>("clubService", "rejectInvite", false, true, rejectClubInvite),
+        endpoint<ClubRequest, Empty>("clubService", "rejectJoinRequest", false, true,
+                                     [](Context&, const ClubRequest&, Empty&) {}),
+        endpoint<ClubRequest, ClubReply>("clubService", "updateMembership", false, true,
+                                         updateClubMembership),
+        endpoint<UpdateCustomizationRequest, UpdateCustomizationResponse>(
+            "clubService", "updateCustomization", false, true, updateClubCustomization),
+        endpoint<GetKeywordsRequest, GetKeywordsResponse>(
+            "keywordService", "getKeywords", false, true,
+            [](Context&, const GetKeywordsRequest&, GetKeywordsResponse&) {}),
     };
     return list;
 }
