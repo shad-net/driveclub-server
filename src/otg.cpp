@@ -262,9 +262,46 @@ HttpResponse gameStateJson(const db::GameState& g) {
     }));
 }
 
+// The game never reports its fame by itself (profileService.updateFame is not called): a player's
+// total is the event fame in their stats gamestate, which the fame leaderboard and levels show.
+void fameFromStats(const db::GameState& g) {
+    static const QRegularExpression player(QStringLiteral("^stats/V\\d+/player/(\\d+)$"));
+    const QRegularExpressionMatch m = player.match(g.resource);
+    if (!m.hasMatch()) {
+        return;
+    }
+    qint64 fame = 0;
+    for (auto it = g.counts.constBegin(); it != g.counts.constEnd(); ++it) {
+        if (it.key().endsWith(QLatin1String("/event/fame"))) {
+            fame += it.value().toInteger();
+        }
+    }
+    const qint64 account = m.captured(1).toLongLong();
+    if (fame > db::fame(account).value_or(db::Fame{}).xp) {
+        egsSetFame(account, fame);
+    }
+}
+
 HttpResponse handleGameState(const HttpRequest& request, const QString& resource) {
     if (request.method == "GET") {
-        const auto g = db::gameState(resource);
+        auto g = db::gameState(resource);
+        // A club's stats and accolades the game never uploads: its members' counters summed.
+        static const QRegularExpression clubState(QStringLiteral("^(\\w+/V\\d+)/club/(\\d+)$"));
+        if (const QRegularExpressionMatch m = clubState.match(resource); !g && m.hasMatch()) {
+            db::GameState sum{resource, 1, {}, 0};
+            for (const db::ClubMember& member : db::clubMembers(m.captured(2).toLongLong())) {
+                const auto own = db::gameState(QStringLiteral("%1/player/%2").arg(m.captured(1)).arg(member.accountId));
+                if (!own) {
+                    continue;
+                }
+                for (auto it = own->counts.constBegin(); it != own->counts.constEnd(); ++it) {
+                    sum.counts.insert(it.key(), sum.counts.value(it.key()).toInteger() + it.value().toInteger());
+                }
+            }
+            if (!sum.counts.isEmpty()) {
+                g = sum;
+            }
+        }
         if (!g) {
             qCInfo(lcOtg).noquote()
                 << "gamestate" << resource << "-> none yet (404, game defaults)";
@@ -274,6 +311,7 @@ HttpResponse handleGameState(const HttpRequest& request, const QString& resource
         }
         qCInfo(lcOtg).noquote() << "gamestate" << resource << "-> version" << g->version << "with"
                                 << g->counts.size() << "counters";
+        fameFromStats(*g);
         return gameStateJson(*g);
     }
     if (request.method != "POST" && request.method != "PUT") {
@@ -303,6 +341,7 @@ HttpResponse handleGameState(const HttpRequest& request, const QString& resource
     ++g.version;
     g.updated = QDateTime::currentMSecsSinceEpoch();
     db::putGameState(g);
+    fameFromStats(g);
     qCInfo(lcOtg).noquote() << "gamestate" << resource << "-> version" << g.version << ":"
                             << (changes.isEmpty() ? QStringLiteral("no changes")
                                                   : changes.join(QStringLiteral(", ")));
@@ -313,6 +352,13 @@ HttpResponse handleGameState(const HttpRequest& request, const QString& resource
 
 void setOtgConfig(const OtgConfig& c) {
     config() = c;
+}
+
+void otgFameFromStats() {
+    for (const db::GameState& g : db::gameStates()) {
+        fameFromStats(g);
+    }
+    egsUpdateClubFameBoard();
 }
 
 QString otgBaseUrl(const HttpRequest& request) {

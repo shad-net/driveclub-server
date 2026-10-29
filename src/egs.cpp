@@ -231,6 +231,11 @@ void aggregatedProfiles(Context&, const GetAggregatedProfilesRequest& req,
         if (const auto m = db::clubMembership(id)) {
             p->mutable_club()->set_id(m->clubId);
         }
+        if (const auto f = db::fame(id)) {
+            p->mutable_progression()->set_xp(f->xp);
+            p->set_stars(f->stars.value_or(0));
+            p->set_elite(f->elite.value_or(0));
+        }
         found << QStringLiteral("%1=%2%3").arg(name).arg(id).arg(known ? QString()
                                                                        : QStringLiteral(" (new)"));
     }
@@ -308,6 +313,16 @@ qint64 sessionAccount(const Context& ctx, QString* name = nullptr) {
     return s ? s->accountId : 0;
 }
 
+// A club's fame is its members' fame summed (shortcut: the game's own club fame, earned while in the
+// club, is not reported to the server).
+qint64 clubFame(qint64 clubId) {
+    qint64 xp = 0;
+    for (const db::ClubMember& m : db::clubMembers(clubId)) {
+        xp += db::fame(m.accountId).value_or(db::Fame{}).xp;
+    }
+    return xp;
+}
+
 void getFame(Context& ctx, const Empty&, GetFameResponse& resp) {
     QString name;
     const qint64 account = sessionAccount(ctx, &name);
@@ -324,7 +339,8 @@ void getFame(Context& ctx, const Empty&, GetFameResponse& resp) {
     }
     resp.set_stars(f.stars.value_or(0));
     resp.set_elite(f.elite.value_or(0));
-    resp.mutable_clubprogression()->set_xp(0); // clubs are not implemented yet
+    const auto membership = account ? db::clubMembership(account) : std::nullopt;
+    resp.mutable_clubprogression()->set_xp(membership ? clubFame(membership->clubId) : 0);
     qCInfo(lcEgs).noquote() << "fame of" << (name.isEmpty() ? QStringLiteral("?") : name) << "->"
                             << (found ? QString::number(f.xp) : QStringLiteral("none stored (0)"));
 }
@@ -842,28 +858,122 @@ void quickSearch(Context&, const QuickSearchRequest& req, QuickSearchResponse& r
     qCInfo(lcEgs).noquote() << "quick search" << prefix << "->" << resp.accounts_size();
 }
 
-// statsService.getAccountStats. The game maps columnNames onto its own 41 stat columns and fails
-// the request (the profile pages keep loading, a wrong answer takes it offline) unless they are
-// there. shortcut: no stats are kept yet, so every set (Tracks, Vehicles, GameModes, Overdrive,
-// FaceOff, Challenges) answers with the columns and no rows.
-void accountStats(Context& ctx, const GetAccountStatsRequest& req, GetAccountStatsResponse& resp) {
-    static const char* const columns[] = {
-        "Attempts", "TotalDistanceDriven", "TotalFame", "Wins", "Created", "Forwarded",
-        "ChallengeCreatedTotal", "ChallengeForwardedTotal", "PositionGainedTotalFame",
-        "PositionGainedAttempts", "SectorAccuracyTotalFame", "SectorAccuracyAttempts",
-        "CleanLapTotalFame", "CleanLapAttempts", "CleanRaceTotalFame", "CleanRaceAttempts",
-        "CleanSectorTotalFame", "CleanSectorAttempts", "CrazySpeedTotalFame", "CrazySpeedAttempts",
-        "DraftTotalFame", "DraftAttempts", "DriftOverdriveTotalFame", "DriftOverdriveAttempts",
-        "VehicleCollisionTotalFame", "VehicleCollisionAttempts", "EnvironmentCollisionTotalFame",
-        "EnvironmentCollisionAttempts", "FinishPositionTotalFame", "FinishPositionAttempts",
-        "OffTrackTotalFame", "OffTrackAttempts", "AverageSpeedTotalFame", "AverageSpeedAttempts",
-        "AverageSpeedWins", "CorneringTotalFame", "CorneringAttempts", "CorneringWins",
-        "DriftTotalFame", "DriftAttempts", "DriftWins", "timestamp"};
-    for (const char* c : columns) {
-        resp.add_columnnames(c);
+// statsService.getAccountStats: one set (Tracks, Vehicles, GameModes, Challenges, Overdrive, FaceOff)
+// for one account or club. The game maps each name in columnNames onto one of its stat columns and
+// fails the request (the profile pages keep loading) unless they are there. The values come from the
+// counters the game itself uploads after each event (OTG gamestate stats/V06/player/<id>, keys
+// "<subject>/<category>/<counter>"); a club's are its members' summed.
+//
+// Tracks, Vehicles, GameModes and Challenges are rows named by their subject (track or car id, mode,
+// solo challenge) with one entry: attempts, distance, fame, wins, created, forwarded. Overdrive and
+// FaceOff are one row whose entry lists fixed subjects in the game's own order (each column picks its
+// subject by position).
+namespace {
+QJsonObject statCounts(qint64 accountId) {
+    const auto g = db::gameState(QStringLiteral("stats/V06/player/%1").arg(accountId));
+    return g ? g->counts : QJsonObject{};
+}
+
+QJsonObject clubStatCounts(qint64 clubId) {
+    QJsonObject sum;
+    for (const db::ClubMember& m : db::clubMembers(clubId)) {
+        const QJsonObject c = statCounts(m.accountId);
+        for (auto it = c.begin(); it != c.end(); ++it) {
+            sum[it.key()] = sum.value(it.key()).toInteger() + it.value().toInteger();
+        }
     }
-    qCInfo(lcEgs).noquote() << "stats" << qs(req.columndefinitionsetname()) << "for"
-                            << egsSessionName(ctx.sessionKey) << "-> no rows yet";
+    return sum;
+}
+
+// A counter; a penalty's fame ("<subject>/overdrive/fame/-") counts as negative.
+qint64 statCounter(const QJsonObject& counts, const QString& subject, const QString& category,
+                   const QString& counter) {
+    const QString key = subject + '/' + category + '/' + counter;
+    if (counts.contains(key)) {
+        return counts.value(key).toInteger();
+    }
+    return -counts.value(key + QStringLiteral("/-")).toInteger();
+}
+} // namespace
+
+void accountStats(Context& ctx, const GetAccountStatsRequest& req, GetAccountStatsResponse& resp) {
+    const QString set = qs(req.columndefinitionsetname());
+    QJsonObject counts;
+    QString owner;
+    if (req.clubs_size() > 0 || req.currentclub()) {
+        const qint64 club = req.clubs_size() > 0 ? req.clubs(0).id()
+                                                 : db::clubMembership(sessionAccount(ctx)).value_or(db::ClubMember{}).clubId;
+        counts = clubStatCounts(club);
+        owner = QStringLiteral("club %1").arg(club);
+    } else {
+        const qint64 account = req.accounts_size() > 0 ? req.accounts(0).id() : sessionAccount(ctx);
+        counts = statCounts(account);
+        owner = QStringLiteral("account %1").arg(account);
+    }
+
+    struct Fixed { const char* column; const char* subject; const char* counter; };
+    static const Fixed overdrive[] = {
+        {"PositionGainedTotalFame", "UniquePosition", "fame"}, {"PositionGainedAttempts", "UniquePosition", "attempts"},
+        {"SectorAccuracyTotalFame", "Sector Accuracy", "fame"}, {"SectorAccuracyAttempts", "Sector Accuracy", "attempts"},
+        {"CleanLapTotalFame", "CleanLap", "fame"}, {"CleanLapAttempts", "CleanLap", "attempts"},
+        {"CleanRaceTotalFame", "CleanRace", "fame"}, {"CleanRaceAttempts", "CleanRace", "attempts"},
+        {"CleanSectorTotalFame", "CleanSector", "fame"}, {"CleanSectorAttempts", "CleanSector", "attempts"},
+        {"CrazySpeedTotalFame", "Crazy Speed", "fame"}, {"CrazySpeedAttempts", "Crazy Speed", "attempts"},
+        {"DraftTotalFame", "Drafting", "fame"}, {"DraftAttempts", "Drafting", "attempts"},
+        {"DriftOverdriveTotalFame", "Drift", "fame"}, {"DriftOverdriveAttempts", "Drift", "attempts"},
+        {"VehicleCollisionTotalFame", "VehicleCollision", "fame"}, {"VehicleCollisionAttempts", "VehicleCollision", "attempts"},
+        {"EnvironmentCollisionTotalFame", "EnvironmentCollision", "fame"},
+        {"EnvironmentCollisionAttempts", "EnvironmentCollision", "attempts"},
+        {"FinishPositionTotalFame", "FinishPosition", "fame"}, {"FinishPositionAttempts", "FinishPosition", "attempts"},
+        {"OffTrackTotalFame", "OffTrack", "fame"}, {"OffTrackAttempts", "OffTrack", "attempts"}};
+    static const Fixed faceoff[] = {
+        {"AverageSpeedTotalFame", "Average Speed Face-Off", "fame"}, {"AverageSpeedAttempts", "Average Speed Face-Off", "attempts"},
+        {"AverageSpeedWins", "Average Speed Face-Off", "wins"},
+        {"CorneringTotalFame", "Cornering Face-Off", "fame"}, {"CorneringAttempts", "Cornering Face-Off", "attempts"},
+        {"CorneringWins", "Cornering Face-Off", "wins"},
+        {"DriftTotalFame", "Drift Face-Off", "fame"}, {"DriftAttempts", "Drift Face-Off", "attempts"},
+        {"DriftWins", "Drift Face-Off", "wins"}};
+
+    if (set == "Overdrive" || set == "FaceOff") {
+        const bool od = set == "Overdrive";
+        const Fixed* first = od ? std::begin(overdrive) : std::begin(faceoff);
+        const Fixed* last = od ? std::end(overdrive) : std::end(faceoff);
+        AccountStat* row = resp.add_stats();
+        row->set_total(1);
+        row->mutable_definition()->set_name(set.toStdString());
+        StatEntry* entry = row->add_entries();
+        for (const Fixed* f = first; f != last; ++f) {
+            resp.add_columnnames(f->column);
+            entry->add_columns(statCounter(counts, f->subject, od ? "overdrive" : "faceoff", f->counter));
+        }
+    } else {
+        static const char* const columns[] = {"Attempts", "TotalDistanceDriven", "TotalFame", "Wins", "Created", "Forwarded"};
+        static const char* const counters[] = {"attempts", "distance", "fame", "wins", "created", "forwarded"};
+        const QString category = set == "Tracks" ? "track" : set == "Vehicles" ? "vehicle"
+                               : set == "GameModes" ? "event" : "solochallenge";
+        for (const char* c : columns) {
+            resp.add_columnnames(c);
+        }
+        const QString suffix = '/' + category + '/';
+        QStringList subjects;
+        for (auto it = counts.begin(); it != counts.end(); ++it) {
+            const qsizetype at = it.key().indexOf(suffix);
+            if (at > 0 && !subjects.contains(it.key().left(at))) {
+                subjects << it.key().left(at);
+            }
+        }
+        for (const QString& subject : subjects) {
+            AccountStat* row = resp.add_stats();
+            row->set_total(1);
+            row->mutable_definition()->set_name(subject.toStdString());
+            StatEntry* entry = row->add_entries();
+            for (const char* counter : counters) {
+                entry->add_columns(statCounter(counts, subject, category, counter));
+            }
+        }
+    }
+    qCInfo(lcEgs).noquote() << "stats" << set << "for" << owner << "(" << egsSessionName(ctx.sessionKey)
+                            << ") ->" << resp.stats_size() << "rows";
 }
 
 // clubService. Clubs live in the database; a player is in at most one club. The creator is the
@@ -928,7 +1038,7 @@ void fillClub(const db::Club& c, ::Club* out) {
         cm->set_mvp(false);
     }
     fillCustomization(c, out->mutable_customization());
-    out->mutable_progression()->set_xp(c.xp);
+    out->mutable_progression()->set_xp(clubFame(c.id));
 }
 
 // Takes a player out of their club; an owner hands the club to the longest member, the last one
@@ -1773,8 +1883,18 @@ void egsSetFame(qint64 accountId, qint64 xp) {
                   (quint64(2) << 60) | quint64(f.xp),
                   {},
                   f.updated});
-    qCInfo(lcEgs).noquote() << "fame of" << egsPlayerName(accountId) << "set to" << f.xp
-                            << "(admin)";
+    qCInfo(lcEgs).noquote() << "fame of" << egsPlayerName(accountId) << "set to" << f.xp;
+    egsUpdateClubFameBoard();
+}
+
+void egsUpdateClubFameBoard() {
+    for (const db::Club& c : db::clubs()) {
+        const qint64 xp = clubFame(c.id);
+        if (xp > 0) {
+            db::putScore({QStringLiteral("fame/club"), QString::number(c.id), (quint64(2) << 60) | quint64(xp), {},
+                          QDateTime::currentMSecsSinceEpoch()});
+        }
+    }
 }
 
 QList<EgsSessionInfo> egsSessions() {

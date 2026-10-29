@@ -90,6 +90,18 @@ enum ProfileOption {
   PROFILE_OPTION_1 = 1;
   PROFILE_OPTION_2 = 2;
   PROFILE_OPTION_3 = 3;
+  PROFILE_OPTION_4 = 4;
+  PROFILE_OPTION_5 = 5;
+  PROFILE_OPTION_6 = 6;
+  PROFILE_OPTION_7 = 7;
+  PROFILE_OPTION_8 = 8;
+  PROFILE_OPTION_9 = 9;
+  PROFILE_OPTION_10 = 10;
+  PROFILE_OPTION_11 = 11;
+  PROFILE_OPTION_12 = 12;
+  PROFILE_OPTION_13 = 13;
+  PROFILE_OPTION_14 = 14;
+  PROFILE_OPTION_15 = 15;
 }
 
 message GetAggregatedProfilesRequest {
@@ -129,6 +141,19 @@ enum FriendType {
   FRIEND_TYPE_0 = 0;
   FRIEND_TYPE_1 = 1;
   FRIEND_TYPE_2 = 2;
+  FRIEND_TYPE_3 = 3;
+  FRIEND_TYPE_4 = 4;
+  FRIEND_TYPE_5 = 5;
+  FRIEND_TYPE_6 = 6;
+  FRIEND_TYPE_7 = 7;
+  FRIEND_TYPE_8 = 8;
+  FRIEND_TYPE_9 = 9;
+  FRIEND_TYPE_10 = 10;
+  FRIEND_TYPE_11 = 11;
+  FRIEND_TYPE_12 = 12;
+  FRIEND_TYPE_13 = 13;
+  FRIEND_TYPE_14 = 14;
+  FRIEND_TYPE_15 = 15;
 }
 
 message GetFriendsRequest {
@@ -300,6 +325,65 @@ enum GenericEnum {
   GENERIC_3 = 3;
   GENERIC_4 = 4;
   GENERIC_5 = 5;
+  // The game sets enum values by number; one missing here makes it crash (null value descriptor).
+  GENERIC_6 = 6;
+  GENERIC_7 = 7;
+  GENERIC_8 = 8;
+  GENERIC_9 = 9;
+  GENERIC_10 = 10;
+  GENERIC_11 = 11;
+  GENERIC_12 = 12;
+  GENERIC_13 = 13;
+  GENERIC_14 = 14;
+  GENERIC_15 = 15;
+  GENERIC_16 = 16;
+  GENERIC_17 = 17;
+  GENERIC_18 = 18;
+  GENERIC_19 = 19;
+  GENERIC_20 = 20;
+  GENERIC_21 = 21;
+  GENERIC_22 = 22;
+  GENERIC_23 = 23;
+  GENERIC_24 = 24;
+  GENERIC_25 = 25;
+  GENERIC_26 = 26;
+  GENERIC_27 = 27;
+  GENERIC_28 = 28;
+  GENERIC_29 = 29;
+  GENERIC_30 = 30;
+  GENERIC_31 = 31;
+  GENERIC_32 = 32;
+  GENERIC_33 = 33;
+  GENERIC_34 = 34;
+  GENERIC_35 = 35;
+  GENERIC_36 = 36;
+  GENERIC_37 = 37;
+  GENERIC_38 = 38;
+  GENERIC_39 = 39;
+  GENERIC_40 = 40;
+  GENERIC_41 = 41;
+  GENERIC_42 = 42;
+  GENERIC_43 = 43;
+  GENERIC_44 = 44;
+  GENERIC_45 = 45;
+  GENERIC_46 = 46;
+  GENERIC_47 = 47;
+  GENERIC_48 = 48;
+  GENERIC_49 = 49;
+  GENERIC_50 = 50;
+  GENERIC_51 = 51;
+  GENERIC_52 = 52;
+  GENERIC_53 = 53;
+  GENERIC_54 = 54;
+  GENERIC_55 = 55;
+  GENERIC_56 = 56;
+  GENERIC_57 = 57;
+  GENERIC_58 = 58;
+  GENERIC_59 = 59;
+  GENERIC_60 = 60;
+  GENERIC_61 = 61;
+  GENERIC_62 = 62;
+  GENERIC_63 = 63;
 }
 
 message IdOnly {

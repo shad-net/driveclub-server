@@ -116,6 +116,7 @@ int main(int argc, char* argv[]) {
                                                   : qPrintable(config->otg.baseUrl));
     egsRestoreSessions();
     otgRestoreTokens();
+    otgFameFromStats();
     startKeepaliveSummaries();
     setupAuth(config->auth);
     if (config->auth.shadnetUrl.isEmpty()) {

@@ -39,6 +39,8 @@ struct OtgTokenInfo {
 QList<OtgTokenInfo> otgTokens();
 bool otgDropToken(const QString& token);
 void otgRestoreTokens();
+// Takes each player's fame from their stored stats (for stats uploaded before fame was derived).
+void otgFameFromStats();
 QString otgBoardKind(const QString& name);
 QJsonArray otgBoardList();
 QJsonArray otgChallenges();

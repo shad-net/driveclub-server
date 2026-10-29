@@ -52,6 +52,8 @@ QList<EgsPlayerInfo> egsPlayers();
 void egsSetPlayerName(qint64 accountId, const QString& name);
 QString egsPlayerName(qint64 accountId);
 void egsSetFame(qint64 accountId, qint64 xp);
+// Puts each club's fame (its members' summed) on the fame/club leaderboard.
+void egsUpdateClubFameBoard();
 bool handleEgs(const HttpRequest& request, const QString& endpoint,
                const HttpServer::Responder& respond);
 
