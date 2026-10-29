@@ -654,7 +654,10 @@ void createLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
 
 void joinLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
     LobbyMemberState me = memberFor(ctx.sessionKey);
-    me.contentRestriction = QByteArray::fromStdString(req.member().contentrestriction());
+    // joinWithAccount (joining a friend's session) sends the joiner's content in extraJoinDetails;
+    // the game turns away a lobby whose entry for it has none and tries again.
+    me.contentRestriction = QByteArray::fromStdString(req.has_member() ? req.member().contentrestriction()
+                                                                       : req.extrajoindetails().contentrestriction());
     const qint64 targetId = req.accounttojoin().id();
     const QString targetName = qs(req.accounttojoin().name());
     const QString lobbyId = qs(req.lobby().id());
@@ -702,6 +705,11 @@ void joinLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
                     }
                 }
             } else {
+                for (LobbyMemberState& m : l.members) {
+                    if (m.accountId == me.accountId && !me.contentRestriction.isEmpty()) {
+                        m.contentRestriction = me.contentRestriction;
+                    }
+                }
                 joined = l;
             }
             found = true;
@@ -715,6 +723,15 @@ void joinLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
     fillLobby(joined, resp.add_lobbies());
     qCInfo(lcEgs).noquote() << "lobby joined by" << me.username << ":" << describe(joined);
     pushLobby(joined, envInt("DCCOOP_ACTION_JOIN", 4), me.accountId);
+    // The joiner keeps showing the session it made at login (and opens no peer connection) until the
+    // lobby is pushed to it as well, as an invitation does (egsLobbyInvitation).
+    const QString joiner = me.username;
+    QTimer::singleShot(std::chrono::seconds(2), [joined, joiner] {
+        LobbyCallbackMessage msg;
+        msg.set_action(static_cast<LobbyAction>(envInt("DCCOOP_ACTION_JOIN", 4)));
+        fillLobby(joined, msg.mutable_lobby());
+        push(joiner, msg);
+    });
 }
 
 void getLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
@@ -836,7 +853,91 @@ void updateMember(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
     }
 }
 
-// updateLobby, changeHost, progressToNextRace: answer with the lobby as it is.
+// changeHost ("promote to session leader"): newHost.id names the new host (else the next member takes
+// over). Everyone gets the lobby with the new host.
+void changeHost(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
+    const LobbyMemberState me = memberFor(ctx.sessionKey);
+    const QString id = qs(req.lobby().id());
+    LobbyState changed;
+    bool found = false;
+    {
+        QMutexLocker lock(&lobbies().mutex);
+        for (LobbyState& l : lobbies().list) {
+            if (l.id != id) {
+                continue;
+            }
+            qint64 next = req.newhost().id() ? req.newhost().id() : req.newhost().accountid();
+            for (const LobbyMemberState& m : l.members) {
+                if (!next && m.accountId != me.accountId) {
+                    next = m.accountId;
+                }
+            }
+            if (next) {
+                for (LobbyMemberState& m : l.members) {
+                    m.host = m.accountId == next;
+                }
+            }
+            changed = l;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        qCWarning(lcEgs).noquote() << "changeHost: no lobby" << id;
+        getLobby(ctx, req, resp);
+        return;
+    }
+    fillLobby(changed, resp.add_lobbies());
+    LobbyCallbackMessage msg;
+    msg.set_action(static_cast<LobbyAction>(envInt("DCCOOP_ACTION_HOST", 4)));
+    fillLobby(changed, msg.mutable_lobby());
+    for (const LobbyMember& m : msg.lobby().memberslist()) {
+        if (m.host()) {
+            *msg.mutable_newhost() = m;
+        }
+    }
+    for (const LobbyMemberState& m : changed.members) {
+        if (m.accountId != me.accountId) {
+            push(m.username, msg);
+        }
+    }
+    qCInfo(lcEgs).noquote() << "host changed by" << me.username << ":" << describe(changed);
+}
+
+// updateLobby: the host sets the lobby's status (a new host right after a changeHost sets 8) or name;
+// the others hear it from the server, as with every lobby change.
+void updateLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
+    const LobbyMemberState me = memberFor(ctx.sessionKey);
+    const QString id = qs(req.lobby().id());
+    LobbyState changed;
+    bool found = false;
+    {
+        QMutexLocker lock(&lobbies().mutex);
+        for (LobbyState& l : lobbies().list) {
+            if (l.id != id) {
+                continue;
+            }
+            if (req.lobby().has_status()) {
+                l.status = req.lobby().status();
+            }
+            if (req.lobby().has_name() && !req.lobby().name().empty()) {
+                l.name = qs(req.lobby().name());
+            }
+            changed = l;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        getLobby(ctx, req, resp);
+        return;
+    }
+    fillLobby(changed, resp.add_lobbies());
+    pushLobby(changed, envInt("DCCOOP_ACTION_UPDATE", 4), me.accountId);
+    qCInfo(lcEgs).noquote() << "lobby updated by" << me.username << ": status" << changed.status << describe(changed);
+}
+
+// progressToNextRace: answer with the lobby as it is.
 // shortcut: their changes are not applied yet; the log shows what the game sends.
 void echoLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
     qCInfo(lcEgs).noquote() << "lobby request (not applied):" << qs(req.ShortDebugString());
@@ -1361,12 +1462,12 @@ const QList<Endpoint>& endpoints() {
                                           leaveLobby),
         endpoint<LobbyRequest, LobbyList>("lobbyService", "removeFromLobby", false, true,
                                           leaveLobby),
-        endpoint<LobbyRequest, LobbyList>("lobbyService", "changeHost", false, true, echoLobby),
+        endpoint<LobbyRequest, LobbyList>("lobbyService", "changeHost", false, true, changeHost),
         endpoint<LobbyRequest, LobbyList>("lobbyService", "progressToNextRace", false, true,
                                           echoLobby),
         endpoint<LobbyRequest, LobbyList>("lobbyService", "updateMember", false, true,
                                           updateMember),
-        endpoint<LobbyRequest, LobbyList>("lobbyService", "updateLobby", false, true, echoLobby),
+        endpoint<LobbyRequest, LobbyList>("lobbyService", "updateLobby", false, true, updateLobby),
         // Services the game retries without end while they are missing from the list. The game
         // reads every field its parser names, so the messages must have them all; they are answered
         // with defaults. shortcut: real stats, search, feed, notifications and accolades.

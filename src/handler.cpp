@@ -22,23 +22,55 @@ namespace {
 Q_LOGGING_CATEGORY(lcHandler, "handler")
 }
 
-// Last gameStatus text each player sent (PUT presence/gameStatus), by lower-case name.
+// Last gameStatus each player sent (PUT presence/gameStatus: the text and its translations), by
+// lower-case name.
 static QMutex& presenceMutex() {
     static QMutex m;
     return m;
 }
-static QHash<QString, QString>& presenceStatus() {
-    static QHash<QString, QString> h;
+static QHash<QString, QJsonObject>& presenceStatus() {
+    static QHash<QString, QJsonObject> h;
     return h;
+}
+
+// The status text in the first of the asked languages ("en-GB,de") the player sent, else the default.
+static QString gameStatusOf(const QString& name, const QStringList& languages = {}) {
+    QMutexLocker l(&presenceMutex());
+    const QJsonObject sent = presenceStatus().value(name.toLower());
+    for (const QString& language : languages) {
+        for (const QJsonValue& v : sent.value("localizedGameStatus").toArray()) {
+            const QString lang = v.toObject().value("npLanguage").toString();
+            if (lang.compare(language, Qt::CaseInsensitive) == 0 ||
+                lang.compare(language.section('-', 0, 0), Qt::CaseInsensitive) == 0) {
+                return v.toObject().value("gameStatus").toString();
+            }
+        }
+    }
+    return sent.value("gameStatus").toString();
 }
 
 // Online = an EGS session of that player was used recently. The game reads the friend list once
 // at start and then waits for push events, which the runtime does not deliver yet; a short window
 // would leave whoever started first seeing everyone offline. So "recently" is generous.
 // shortcut: replace with real presence push events once the runtime fires them.
+// A game with the presence poll (dccoop/presence/<name>, every 5 s) is online while it keeps asking:
+// a closed game shows as offline within seconds. Older runtimes fall back to their EGS sessions.
+static QHash<QString, qint64>& presencePolls() {
+    static QHash<QString, qint64> h; // lower-case name -> last poll, under presenceMutex
+    return h;
+}
+
 static bool playerOnline(const QString& name) {
+    constexpr qint64 PollWindowMs = 15 * 1000;
     constexpr qint64 OnlineWindowMs = 6 * 60 * 60 * 1000;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    {
+        QMutexLocker l(&presenceMutex());
+        const auto polled = presencePolls().constFind(name.toLower());
+        if (polled != presencePolls().constEnd()) {
+            return now - *polled < PollWindowMs;
+        }
+    }
     for (const EgsSessionInfo& s : egsSessions()) {
         if (s.name.compare(name, Qt::CaseInsensitive) == 0 && now - s.lastSeen < OnlineWindowMs) {
             return true;
@@ -56,8 +88,7 @@ static QJsonObject presenceOf(const QString& name) {
         primary.insert("gameTitleInfo", QJsonObject{{"npTitleId", "CUSA00003_00"},
                                                     {"titleName", "DRIVECLUB"},
                                                     {"launchPlatform", "PS4"}});
-        QMutexLocker l(&presenceMutex());
-        const QString status = presenceStatus().value(name.toLower());
+        const QString status = gameStatusOf(name);
         if (!status.isEmpty()) {
             primary.insert("gameStatus", status);
         }
@@ -137,7 +168,7 @@ static QByteArray avatarPng(const QString& name) {
 static bool handlePsn(const HttpRequest& request, const QString& endpoint,
                       const HttpServer::Responder& respond) {
     static const QRegularExpression users(
-        QStringLiteral("^v1/users/([^/]+)/(friendList|presence/gameStatus)$"));
+        QStringLiteral("^v1/users/([^/]+)/(friendList|presence/gameStatus|presence)$"));
     const bool get = request.method == "GET";
     HttpResponse r;
     r.contentType = "application/json";
@@ -159,12 +190,32 @@ static bool handlePsn(const HttpRequest& request, const QString& endpoint,
                                            {"totalResults", list.size()}})
                      .toJson(QJsonDocument::Compact);
     } else if (m.hasMatch() && request.method == "PUT" && m.captured(2) == QLatin1String("presence/gameStatus")) {
-        const QString status = QJsonDocument::fromJson(request.body).object().value("gameStatus").toString();
+        const QJsonObject sent = QJsonDocument::fromJson(request.body).object();
         {
             QMutexLocker l(&presenceMutex());
-            presenceStatus().insert(m.captured(1).toLower(), status);
+            presenceStatus().insert(m.captured(1).toLower(), sent);
         }
         r.status = 204;
+    } else if (m.hasMatch() && get && m.captured(2) == QLatin1String("presence")) {
+        // One friend's presence (the game asks when it shows what they are doing). Answered in both
+        // shapes the PSN API used: flat and with a platformInfoList.
+        const QString name = m.captured(1);
+        const bool online = playerOnline(name);
+        const QString status = gameStatusOf(
+            name, request.query.queryItemValue(QStringLiteral("npLanguages")).split(',', Qt::SkipEmptyParts));
+        QJsonObject info{{"onlineStatus", online ? "online" : "offline"}, {"platform", "PS4"}};
+        if (online) {
+            info.insert("npTitleId", "CUSA00003_00");
+            info.insert("titleName", "DRIVECLUB");
+            if (!status.isEmpty()) {
+                info.insert("gameStatus", status);
+            }
+        }
+        QJsonObject presence = info;
+        presence.insert("platformInfoList", QJsonArray{info});
+        presence.insert("hasBroadcastData", false);
+        presence.insert("primaryInfo", presenceOf(name).value("primaryInfo"));
+        r.body = QJsonDocument(QJsonObject{{"presence", presence}}).toJson(QJsonDocument::Compact);
     } else if (get && endpoint == QLatin1String("v1/profiles")) {
         // The game reads "profiles"[i] (onlineId, npId, avatarUrl, personalDetail.profilePictureUrl)
         // for the comma-separated onlineIds it asks for. npId: the game parses it
@@ -207,6 +258,26 @@ static bool handlePsn(const HttpRequest& request, const QString& endpoint,
         r.body = R"({"skus":[],"links":[]})";
     } else if (get && endpoint == QLatin1String("v1/users/me/entitlements")) {
         r.body = R"({"entitlements":[],"start":0,"size":0,"totalResults":0})";
+    } else if (get && endpoint.startsWith(QLatin1String("dccoop/presence/"))) {
+        // Friends' presence for the runtime, which polls it and raises the presence push events the
+        // game only learns changes from: one "<name>\t<1 online|0>\t<gameStatus>" line per friend.
+        // The poll itself is the asking player's sign of life (playerOnline).
+        const QString me = endpoint.mid(16);
+        {
+            QMutexLocker l(&presenceMutex());
+            presencePolls().insert(me.toLower(), QDateTime::currentMSecsSinceEpoch());
+        }
+        QByteArray body;
+        for (const db::Player& p : db::players()) {
+            if (!p.loggedIn || p.name.compare(me, Qt::CaseInsensitive) == 0) {
+                continue;
+            }
+            const bool online = playerOnline(p.name);
+            body += (p.name + '\t' + (online ? "1" : "0") + '\t' + (online ? gameStatusOf(p.name) : QString()))
+                        .toUtf8().replace('\n', ' ') + '\n';
+        }
+        r.contentType = "text/plain; charset=utf-8";
+        r.body = body;
     } else if (get && endpoint.startsWith(QLatin1String("dccoop/avatar/"))) {
         QString name = endpoint.mid(14);
         name.chop(name.endsWith(QLatin1String(".png")) ? 4 : 0);

@@ -620,6 +620,7 @@ message LobbyMember {
   optional string clientVersion = 7;
   optional bool aiControlled = 8;
   optional int64 accountId = 9;
+  optional int64 id = 10; // changeHost names the new host by newHost.id
 }
 
 message Lobby {
