@@ -673,6 +673,7 @@ message LobbyRequest {
   optional bool migrateIfPartyLeader = 7;
   optional LobbyMember newHost = 8;
   repeated LobbyMember members = 9;
+  optional int64 accountId = 10; // removeFromLobby: the member to kick
 }
 
 message LobbyCallbackMessage {

@@ -750,20 +750,29 @@ void getLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
     }
 }
 
+// leaveLobby, and removeFromLobby, where the host names the member to kick in accountId (the caller
+// itself when it is missing). The kicked player hears it too, the others as with a leave.
 void leaveLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
     const LobbyMemberState me = memberFor(ctx.sessionKey);
+    const qint64 who = req.accountid() ? req.accountid() : me.accountId;
     qCInfo(lcEgs).noquote() << "leave request from" << me.username << "-" << qs(req.ShortDebugString());
     QList<LobbyState> left;
     {
         QMutexLocker lock(&lobbies().mutex);
-        left = leaveAll(me.accountId, req.lobby().has_lobbytype() ? req.lobby().lobbytype() : -1,
-                        qs(req.lobbyid()));
+        left = leaveAll(who, req.lobby().has_lobbytype() ? req.lobby().lobbytype() : -1, qs(req.lobbyid()));
     }
     for (const LobbyState& l : left) {
         LobbyResult* r = resp.add_results();
         r->set_lobbyid(l.id.toStdString());
-        qCInfo(lcEgs).noquote() << "lobby left by" << me.username << ":" << describe(l);
-        pushLobby(l, envInt("DCCOOP_ACTION_LEAVE", 6), me.accountId);
+        qCInfo(lcEgs).noquote() << "lobby left by" << egsPlayerName(who) << (who != me.accountId ? "(kicked by " + me.username + ")" : QString()) << ":" << describe(l);
+        // A kick: the host that kicked keeps showing the player otherwise, so it hears it as well.
+        pushLobby(l, envInt("DCCOOP_ACTION_LEAVE", 6), who != me.accountId ? 0 : me.accountId);
+        if (who != me.accountId) {
+            LobbyCallbackMessage msg;
+            msg.set_action(static_cast<LobbyAction>(envInt("DCCOOP_ACTION_KICKED", 6)));
+            fillLobby(l, msg.mutable_lobby());
+            push(egsPlayerName(who), msg);
+        }
     }
 }
 
@@ -897,9 +906,7 @@ void changeHost(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
         }
     }
     for (const LobbyMemberState& m : changed.members) {
-        if (m.accountId != me.accountId) {
-            push(m.username, msg);
-        }
+        push(m.username, msg); // the old host too: it keeps showing itself as leader otherwise
     }
     qCInfo(lcEgs).noquote() << "host changed by" << me.username << ":" << describe(changed);
 }
