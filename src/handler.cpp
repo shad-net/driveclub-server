@@ -15,6 +15,9 @@
 #include <QMutex>
 #include <QRegularExpression>
 
+#include <algorithm>
+#include <cmath>
+
 namespace {
 Q_LOGGING_CATEGORY(lcHandler, "handler")
 }
@@ -60,6 +63,71 @@ static QJsonObject presenceOf(const QString& name) {
         }
     }
     return QJsonObject{{"primaryInfo", primary}};
+}
+
+// A player's avatar: a 128x128 PNG made from the name (a head-and-shoulders figure on a colour
+// from a hash of the name). Without an avatarUrl the game shows an empty spinning ring where the
+// avatar goes (menu bar, profile, friends) and waits for it.
+// shortcut: generated pictures only; uploading your own is not supported.
+static QByteArray avatarPng(const QString& name) {
+    constexpr int Size = 128;
+    const uint h = qHash(name.toLower());
+    const int hue = int(h % 360);
+    // HSV (hue, 0.55, 0.75) to RGB
+    const auto channel = [hue](int n) {
+        const double k = std::fmod(n + hue / 60.0, 6.0);
+        const double v = 0.75, s = 0.55;
+        return uchar(255 * (v - v * s * std::max(0.0, std::min({k, 4 - k, 1.0}))));
+    };
+    const uchar bg[3] = {channel(5), channel(3), channel(1)};
+    const uchar fg[3] = {235, 235, 235};
+    QByteArray raw;
+    raw.reserve((Size * 3 + 1) * Size);
+    for (int y = 0; y < Size; ++y) {
+        raw.append(char(0)); // filter: none
+        for (int x = 0; x < Size; ++x) {
+            const double dx = x - Size / 2.0, dyHead = y - Size * 0.40, dyBody = y - Size * 1.02;
+            const bool head = dx * dx + dyHead * dyHead < (Size * 0.19) * (Size * 0.19);
+            const bool body = dx * dx + dyBody * dyBody < (Size * 0.40) * (Size * 0.40);
+            const uchar* c = head || body ? fg : bg;
+            raw.append(char(c[0])).append(char(c[1])).append(char(c[2]));
+        }
+    }
+    static quint32 table[256];
+    if (table[1] == 0) {
+        for (quint32 i = 0; i < 256; ++i) {
+            quint32 c = i;
+            for (int k = 0; k < 8; ++k) {
+                c = c & 1 ? 0xedb88320u ^ (c >> 1) : c >> 1;
+            }
+            table[i] = c;
+        }
+    }
+    const auto chunk = [](const char* type, const QByteArray& data) {
+        QByteArray out;
+        const auto be32 = [&out](quint32 v) {
+            out.append(char(v >> 24)).append(char(v >> 16)).append(char(v >> 8)).append(char(v));
+        };
+        be32(quint32(data.size()));
+        const QByteArray body = QByteArray(type, 4) + data;
+        quint32 crc = 0xffffffffu;
+        for (const char b : body) {
+            crc = table[(crc ^ uchar(b)) & 0xff] ^ (crc >> 8);
+        }
+        out.append(body);
+        be32(crc ^ 0xffffffffu);
+        return out;
+    };
+    QByteArray ihdr;
+    for (const quint32 v : {quint32(Size), quint32(Size)}) {
+        ihdr.append(char(v >> 24)).append(char(v >> 16)).append(char(v >> 8)).append(char(v));
+    }
+    ihdr.append(char(8)).append(char(2)).append(char(0)).append(char(0)).append(char(0));
+    QByteArray png("\x89PNG\r\n\x1a\n", 8);
+    png += chunk("IHDR", ihdr);
+    png += chunk("IDAT", qCompress(raw, 9).mid(4)); // qCompress: 4-byte size, then a zlib stream
+    png += chunk("IEND", {});
+    return png;
 }
 
 // The Sony web API calls the game makes next to EGS and OTG, answered with the smallest valid reply:
@@ -111,18 +179,20 @@ static bool handlePsn(const HttpRequest& request, const QString& endpoint,
             if (!player) {
                 continue;
             }
+            const QString avatar =
+                otgBaseUrl(request) + QStringLiteral("/dccoop/avatar/%1.png").arg(player->name);
             profiles.append(QJsonObject{
                 {"onlineId", player->name},
                 {"npId", QString::fromLatin1((player->name + "@b7.de.np").toUtf8().toBase64())},
-                {"avatarUrl", QString()},
+                {"avatarUrl", avatar},
                 {"plus", 1},
                 {"aboutMe", QString()},
                 {"languagesUsed", QJsonArray()},
-                {"avatarUrls", QJsonArray()},
+                {"avatarUrls", QJsonArray{QJsonObject{{"size", "m"}, {"avatarUrl", avatar}}}},
                 {"isOfficiallyVerified", false},
                 {"personalDetail", QJsonObject{{"firstName", QString()},
                                                {"lastName", QString()},
-                                               {"profilePictureUrl", QString()},
+                                               {"profilePictureUrl", avatar},
                                                {"profilePictureUrls", QJsonArray()}}}});
         }
         if (profiles.isEmpty()) {
@@ -135,6 +205,13 @@ static bool handlePsn(const HttpRequest& request, const QString& endpoint,
         }
     } else if (get && endpoint.startsWith(QLatin1String("v1/users/me/container/"))) {
         r.body = R"({"skus":[],"links":[]})";
+    } else if (get && endpoint == QLatin1String("v1/users/me/entitlements")) {
+        r.body = R"({"entitlements":[],"start":0,"size":0,"totalResults":0})";
+    } else if (get && endpoint.startsWith(QLatin1String("dccoop/avatar/"))) {
+        QString name = endpoint.mid(14);
+        name.chop(name.endsWith(QLatin1String(".png")) ? 4 : 0);
+        r.contentType = "image/png";
+        r.body = avatarPng(name);
     } else if (get && endpoint.startsWith(QLatin1String("dccoop/p2p/"))) {
         // P2P directory in place of a matchmaking server: each game registers the UDP port of its
         // P2P transport (dccoop/p2p/register/<name>?port=N, address = where the request came from),

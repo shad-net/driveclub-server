@@ -326,13 +326,15 @@ message GetAccountStatsRequest {
   repeated IdOnly clubs = 5;
 }
 
+// The game maps each name in columnNames to one of its 41 stat columns (Attempts, TotalFame, ...);
+// entries[].columns are int64 values in columnNames order. definition.name is the row's subject
+// (a track, vehicle, game mode, ... depending on the set).
 message StatDefinition {
   optional string name = 1;
-  repeated string columns = 2;
 }
 
 message StatEntry {
-  repeated string columns = 1;
+  repeated int64 columns = 1;
 }
 
 message AccountStat {
@@ -342,7 +344,53 @@ message AccountStat {
 }
 
 message GetAccountStatsResponse {
-  repeated AccountStat stats = 1;
+  repeated string columnNames = 1;
+  repeated AccountStat stats = 2;
+}
+
+// activityService.getNotifications
+message GetNotificationsRequest {
+  optional int32 maximumEntries = 1;
+  optional int64 minVersion = 2;
+  repeated GenericEnum orders = 3;
+  optional int64 maxVersion = 4;
+  optional string language = 5;
+}
+
+message GetNotificationsResponse {
+  repeated ActivityEntry entries = 1;
+}
+
+// objectiveService.getPlayerAccoladeProgress
+message GetPlayerAccoladeProgressRequest {
+  optional bool currentAccount = 1;
+  optional int64 accoladeId = 2;
+  optional string accoladeName = 3;
+  optional int64 accountId = 4;
+}
+
+message AccoladeProgress {
+  optional string accoladeName = 1;
+  optional GenericEnum type = 2;
+  optional int64 progress = 3;
+}
+
+message GetPlayerAccoladeProgressResponse {
+  repeated AccoladeProgress progressList = 1;
+}
+
+// sessionService.queryStatus: which of the asked accounts have a session (are online).
+message QueryStatusRequest {
+  repeated IdOnly accounts = 1;
+}
+
+message StatusSession {
+  optional LobbySessionKey sessionKey = 1;
+}
+
+message QueryStatusResponse {
+  repeated StatusSession sessions = 1;
+  repeated IdOnly accounts = 2;
 }
 
 // activityService.getActivityFeed

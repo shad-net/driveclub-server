@@ -834,6 +834,51 @@ void quickSearch(Context&, const QuickSearchRequest& req, QuickSearchResponse& r
     qCInfo(lcEgs).noquote() << "quick search" << prefix << "->" << resp.accounts_size();
 }
 
+// statsService.getAccountStats. The game maps columnNames onto its own 41 stat columns and fails
+// the request (the profile pages keep loading, a wrong answer takes it offline) unless they are
+// there. shortcut: no stats are kept yet, so every set (Tracks, Vehicles, GameModes, Overdrive,
+// FaceOff, Challenges) answers with the columns and no rows.
+void accountStats(Context& ctx, const GetAccountStatsRequest& req, GetAccountStatsResponse& resp) {
+    static const char* const columns[] = {
+        "Attempts", "TotalDistanceDriven", "TotalFame", "Wins", "Created", "Forwarded",
+        "ChallengeCreatedTotal", "ChallengeForwardedTotal", "PositionGainedTotalFame",
+        "PositionGainedAttempts", "SectorAccuracyTotalFame", "SectorAccuracyAttempts",
+        "CleanLapTotalFame", "CleanLapAttempts", "CleanRaceTotalFame", "CleanRaceAttempts",
+        "CleanSectorTotalFame", "CleanSectorAttempts", "CrazySpeedTotalFame", "CrazySpeedAttempts",
+        "DraftTotalFame", "DraftAttempts", "DriftOverdriveTotalFame", "DriftOverdriveAttempts",
+        "VehicleCollisionTotalFame", "VehicleCollisionAttempts", "EnvironmentCollisionTotalFame",
+        "EnvironmentCollisionAttempts", "FinishPositionTotalFame", "FinishPositionAttempts",
+        "OffTrackTotalFame", "OffTrackAttempts", "AverageSpeedTotalFame", "AverageSpeedAttempts",
+        "AverageSpeedWins", "CorneringTotalFame", "CorneringAttempts", "CorneringWins",
+        "DriftTotalFame", "DriftAttempts", "DriftWins", "timestamp"};
+    for (const char* c : columns) {
+        resp.add_columnnames(c);
+    }
+    qCInfo(lcEgs).noquote() << "stats" << qs(req.columndefinitionsetname()) << "for"
+                            << egsSessionName(ctx.sessionKey) << "-> no rows yet";
+}
+
+// sessionService.queryStatus: the asked accounts that have a session in use are online.
+void queryStatus(Context&, const QueryStatusRequest& req, QueryStatusResponse& resp) {
+    constexpr qint64 OnlineWindowMs = 2 * 60 * 1000;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    QHash<qint64, QString> online;
+    for (const EgsSessionInfo& s : egsSessions()) {
+        if (now - s.lastSeen < OnlineWindowMs) {
+            online.insert(s.accountId, s.name);
+        }
+    }
+    for (const IdOnly& a : req.accounts()) {
+        if (!online.contains(a.id())) {
+            continue;
+        }
+        LobbySessionKey* k = resp.add_sessions()->mutable_sessionkey();
+        k->set_accountid(a.id());
+        k->set_username(online.value(a.id()).toStdString());
+        resp.add_accounts()->set_id(a.id());
+    }
+}
+
 const QList<Endpoint>& endpoints() {
     static const QList<Endpoint> list = {
         // Registered by the game itself before it has a schema (0xA29400), so not listed.
@@ -919,9 +964,7 @@ const QList<Endpoint>& endpoints() {
         endpoint<LobbyRequest, LobbyList>("lobbyService", "updateLobby", false, true, echoLobby),
         // Services the game retries without end while they are missing from the list. The game
         // reads every field its parser names, so the messages must have them all; they are answered
-        // with defaults. shortcut: real stats, search and feed. objectiveService and
-        // activityService.getNotifications stay unlisted until their response fields are known;
-        // statsService.getAccountStats too: an empty stats list takes the game offline.
+        // with defaults. shortcut: real stats, search, feed, notifications and accolades.
         // matchingService: logged so its use can be followed. shortcut: one slot per event id, no
         // real matchmaking; players counted from everyone registered for the same id.
         endpoint<MatchingRequest, RegisterInterestResponse>(
@@ -980,6 +1023,18 @@ const QList<Endpoint>& endpoints() {
         endpoint<GetActivityFeedRequest, GetActivityFeedResponse>(
             "activityService", "getActivityFeed", false, true,
             [](Context&, const GetActivityFeedRequest&, GetActivityFeedResponse&) {}),
+        // Nothing to report yet: answered so the social hub and menu stop waiting.
+        endpoint<GetNotificationsRequest, GetNotificationsResponse>(
+            "activityService", "getNotifications", false, true,
+            [](Context&, const GetNotificationsRequest&, GetNotificationsResponse&) {}),
+        endpoint<GetPlayerAccoladeProgressRequest, GetPlayerAccoladeProgressResponse>(
+            "objectiveService", "getPlayerAccoladeProgress", false, true,
+            [](Context&, const GetPlayerAccoladeProgressRequest&,
+               GetPlayerAccoladeProgressResponse&) {}),
+        endpoint<GetAccountStatsRequest, GetAccountStatsResponse>(
+            "statsService", "getAccountStats", false, true, accountStats),
+        endpoint<QueryStatusRequest, QueryStatusResponse>("sessionService", "queryStatus", false,
+                                                          true, queryStatus),
     };
     return list;
 }
