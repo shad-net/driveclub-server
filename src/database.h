@@ -48,6 +48,7 @@ bool putScore(const Score& score); // insert or replace
 bool removeScore(const QString& board, const QString& entrant);
 bool clearBoard(const QString& board);
 QList<Score> scoresWithGhosts();
+QList<Score> scoresLike(const QString& boardPattern); // SQL LIKE on the board name, best first
 
 struct BoardInfo {
     QString name;

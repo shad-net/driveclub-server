@@ -166,9 +166,30 @@ HttpResponse readBoard(const HttpRequest& request, const QString& name) {
     if (method == QLatin1String("select")) {
         const QStringList wanted =
             request.query.queryItemValue(QStringLiteral("entrants")).split(',', Qt::SkipEmptyParts);
+        QStringList found;
         for (qsizetype i = 0; i < list.size(); ++i) {
             if (wanted.contains(list.at(i).entrant)) {
                 out.append(entryJson(list.at(i), i + 1));
+                found.append(list.at(i).entrant);
+            }
+        }
+        // Face-offs (faceoffs/<track>/<id>/<car>/<wet>) are kept per car: a friend who drove this stretch in
+        // another car gives their best from any car, so friends in different cars still face off.
+        const QStringList parts = name.split('/');
+        if (parts.size() == 5 && parts.at(0) == QLatin1String("faceoffs") && found.size() < wanted.size()) {
+            // only the car is a wildcard: '_' in the track name is escaped
+            const QString pattern = parts.mid(0, 3).join('/').replace('_', QLatin1String("\\_")) +
+                                    QStringLiteral("/%/") + parts.at(4);
+            qsizetype other = 0;
+            for (const Entry& e : db::scoresLike(pattern)) {
+                if (wanted.contains(e.entrant) && !found.contains(e.entrant)) {
+                    out.append(entryJson(e, list.size() + (++other)));
+                    found.append(e.entrant);
+                }
+            }
+            if (other) {
+                qCInfo(lcOtg).noquote() << "leaderboard" << name << "select: +" << other
+                                        << "from other cars";
             }
         }
     } else if (method == QLatin1String("nearby")) {

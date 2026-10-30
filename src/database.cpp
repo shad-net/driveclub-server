@@ -366,6 +366,22 @@ QList<Score> scoresWithGhosts() {
     return out;
 }
 
+QList<Score> scoresLike(const QString& boardPattern) {
+    QList<Score> out;
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT %1 FROM scores WHERE board LIKE ? ESCAPE '\\' "
+                             "ORDER BY score DESC, updated ASC")
+                  .arg(QLatin1String(ScoreColumns)));
+    q.addBindValue(text(boardPattern));
+    if (run(q, "read boards like")) {
+        while (q.next()) {
+            out.append(scoreFrom(q));
+        }
+    }
+    return out;
+}
+
 qsizetype boardSize(const QString& board) {
     QMutexLocker l(&lock());
     QSqlQuery q(connection());
