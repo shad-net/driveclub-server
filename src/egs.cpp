@@ -1826,6 +1826,24 @@ void setEgsConfig(const EgsConfig& c) {
     config() = c;
 }
 
+QString egsLobbyHost(const QString& player) {
+    QMutexLocker lock(&lobbies().mutex);
+    for (auto l = lobbies().list.crbegin(); l != lobbies().list.crend(); ++l) {
+        const bool in = std::any_of(l->members.cbegin(), l->members.cend(), [&player](const LobbyMemberState& m) {
+            return m.username.compare(player, Qt::CaseInsensitive) == 0;
+        });
+        if (l->members.size() < 2 || !in) {
+            continue;
+        }
+        for (const LobbyMemberState& m : l->members) {
+            if (m.host) {
+                return m.username;
+            }
+        }
+    }
+    return {};
+}
+
 QByteArray egsBots(const QString& player, const QString& command) {
     constexpr int kMaxBots = 7;
     // By the host's name, not by lobby: a player can be in an old lobby and a new one with the same people,

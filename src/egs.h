@@ -25,6 +25,8 @@ void egsStartEvents();
 // none. Answer: count=, host= (1: this player hosts), peers= (the other players, comma-separated) and
 // note= (a line for the overlay).
 QByteArray egsBots(const QString& player, const QString& command);
+// The host of the private lobby the player races in (the newest with a friend), empty when none.
+QString egsLobbyHost(const QString& player);
 QByteArray egsSignature(const QString& method, const QByteArray& sessionKey,
                         const QByteArray& body);
 std::optional<QByteArray> egsFindSessionKey(const QString& method, const QByteArray& body,

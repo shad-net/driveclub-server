@@ -286,6 +286,12 @@ static bool handlePsn(const HttpRequest& request, const QString& endpoint,
         r.body = eventListsChampionship(endpoint.mid(20),
                                         request.query.queryItemValue(QStringLiteral("do")),
                                         request.query.queryItemValue(QStringLiteral("block")).toLatin1());
+    } else if (get && endpoint.startsWith(QLatin1String("dccoop/result/"))) {
+        // A player's place in a private lobby race (?place=N&field=M), from its runtime: answered with
+        // the standings of the lobby host's championship, empty when none is on.
+        r.contentType = "text/plain; charset=utf-8";
+        r.body = eventListsResult(endpoint.mid(14), request.query.queryItemValue(QStringLiteral("place")).toInt(),
+                                  request.query.queryItemValue(QStringLiteral("field")).toInt());
     } else if (get && endpoint.startsWith(QLatin1String("dccoop/xpboost/"))) {
         // A player's XP boost, for its runtime's online menu (?do=toggle).
         r.contentType = "text/plain; charset=utf-8";

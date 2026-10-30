@@ -4,6 +4,7 @@
 #include "eventlists.h"
 
 #include "content_ids.h"
+#include "egs.h"
 // The game reads a field named "slots", which is a Qt macro.
 #pragma push_macro("slots")
 #undef slots
@@ -68,6 +69,10 @@ struct Championship {
     qint64 seq = 0;     // changes whenever the runtime has to write the lobby settings again
     qint64 changed = 0; // ms since epoch of the last race change
     bool startFirst = false; // the runtime starts race 1 as well (a random championship)
+    // Standings: each race's finishing places by player (lower-case name -> place), as the players'
+    // runtimes report them (dccoop/result), and the names as written.
+    QList<QHash<QString, int>> places;
+    QHash<QString, QString> names;
 };
 
 struct State {
@@ -567,6 +572,10 @@ QByteArray eventListsChampionship(const QString& player, const QString& command,
             c.startFirst = false;
         }
         if (b.size() == kLobbySettingsSize && c.races.size() < kMaxRaces) {
+            if (c.races.isEmpty()) {
+                c.places.clear();
+                c.names.clear();
+            }
             c.races << b;
             qCInfo(lcEvents).noquote() << player << "added championship race" << c.races.size()
                                        << ":" << raceTitle(b);
@@ -582,6 +591,8 @@ QByteArray eventListsChampionship(const QString& player, const QString& command,
         const QByteArray b = QByteArray::fromHex(block);
         if (b.size() == kLobbySettingsSize) {
             c.races = randomRaces(b, 3);
+            c.places.clear();
+            c.names.clear();
             c.running = true;
             c.race = 0;
             c.changed = now;
@@ -603,12 +614,98 @@ QByteArray eventListsChampionship(const QString& player, const QString& command,
             c.running = true;
             c.race = 0;
             c.changed = now;
+            c.places.clear();
+            c.names.clear();
             qCInfo(lcEvents).noquote() << player << "started a championship of" << c.races.size()
                                        << "races";
         }
         ++c.seq;
     }
     return championshipAnswer(c);
+}
+
+namespace {
+
+constexpr int kPoints[] = {25, 18, 15, 12, 10, 8, 6, 4, 2, 1}; // by place, as in Formula 1
+
+// The standings as the runtime shows them: "races=<driven>/<all>", "final=0|1", then one
+// "<place>\t<name>\t<points>\t<place in race 1>,<race 2>,..." line per player, best first ("-" for a race
+// without a result).
+QByteArray standingsAnswer(const Championship& c) {
+    struct Row { QString key; int points = 0; };
+    QList<Row> rows;
+    for (auto it = c.names.cbegin(); it != c.names.cend(); ++it) {
+        Row r{it.key()};
+        for (const QHash<QString, int>& race : c.places) {
+            const int place = race.value(r.key);
+            if (place >= 1 && place <= int(std::size(kPoints))) {
+                r.points += kPoints[place - 1];
+            }
+        }
+        rows << r;
+    }
+    std::stable_sort(rows.begin(), rows.end(), [&c](const Row& a, const Row& b) {
+        if (a.points != b.points) {
+            return a.points > b.points;
+        }
+        // a tie goes to the better last result
+        for (qsizetype i = c.places.size() - 1; i >= 0; --i) {
+            const int pa = c.places.at(i).value(a.key, 99), pb = c.places.at(i).value(b.key, 99);
+            if (pa != pb) {
+                return pa < pb;
+            }
+        }
+        return false;
+    });
+    const qsizetype driven = c.places.size();
+    QByteArray out = "races=" + QByteArray::number(driven) + '/' + QByteArray::number(c.races.size()) +
+                     "\nfinal=" + (driven >= c.races.size() ? "1" : "0") + '\n';
+    for (qsizetype i = 0; i < rows.size(); ++i) {
+        QStringList places;
+        for (const QHash<QString, int>& race : c.places) {
+            const int place = race.value(rows.at(i).key);
+            places << (place ? QString::number(place) : QStringLiteral("-"));
+        }
+        out += QStringLiteral("%1\t%2\t%3\t%4\n")
+                   .arg(i + 1)
+                   .arg(c.names.value(rows.at(i).key), QString::number(rows.at(i).points), places.join(','))
+                   .toUtf8();
+    }
+    return out;
+}
+
+} // namespace
+
+QByteArray eventListsResult(const QString& player, int place, int field) {
+    // The championship is the host's: the lobby the player races in tells whose.
+    const QString host = egsLobbyHost(player);
+    QMutexLocker lock(&state().mutex);
+    const auto it = state().championships.find((host.isEmpty() ? player : host).toLower());
+    if (it == state().championships.end() || it->races.isEmpty()) {
+        return {};
+    }
+    Championship& c = *it;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    // The race just driven: the host's stats may already have moved the championship on (shortly before).
+    const bool finished = c.race >= c.races.size();
+    if ((!c.running && !finished) || (finished && now - c.changed > 120000)) {
+        return {}; // no championship on, or it ended a while ago: not a championship race
+    }
+    qsizetype race = c.race;
+    if (race > 0 && (now - c.changed < 60000 || finished)) {
+        --race;
+    }
+    if (race < 0 || race >= c.races.size() || place < 1 || field < 1) {
+        return standingsAnswer(c);
+    }
+    while (c.places.size() <= race) {
+        c.places << QHash<QString, int>();
+    }
+    c.places[race].insert(player.toLower(), place);
+    c.names.insert(player.toLower(), player);
+    qCInfo(lcEvents).noquote() << player << "finished championship race" << race + 1 << "of" << c.races.size()
+                               << "in place" << place << "of" << field;
+    return standingsAnswer(c);
 }
 
 void eventListsRaceFinished(const QString& player) {

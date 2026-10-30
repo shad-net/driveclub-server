@@ -51,3 +51,6 @@ qint64 eventListsNextRace(qint64 slotId);
 QByteArray eventListsChampionship(const QString& player, const QString& command,
                                   const QByteArray& block);
 void eventListsRaceFinished(const QString& player);
+// A player's finishing place in a private lobby race (dccoop/result): kept for the championship of the
+// lobby's host, answered with the standings (empty when no championship is on).
+QByteArray eventListsResult(const QString& player, int place, int field);
