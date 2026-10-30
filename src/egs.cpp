@@ -5,7 +5,12 @@
 
 #include "auth.h"
 #include "database.h"
+#include "eventlists.h"
+// The game reads a field named "slots", which is a Qt macro.
+#pragma push_macro("slots")
+#undef slots
 #include "egs.pb.h"
+#pragma pop_macro("slots")
 #include "otg.h"
 
 #include <google/protobuf/descriptor.pb.h>
@@ -14,12 +19,18 @@
 
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QFile>
 #include <QHash>
 #include <QList>
 #include <QLoggingCategory>
+#include <QTimeZone>
+#include <QTimer>
+
+#include <chrono>
 #include <QMessageAuthenticationCode>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QSet>
 #include <QStringList>
 #include <QUuid>
 
@@ -185,12 +196,21 @@ void minimalProfiles(Context&, const GetMinimalProfilesRequest& req,
                      GetMinimalProfilesResponse& resp) {
     QStringList names;
     for (const qint64 id : req.accounts()) {
+        // The game asks for negative ids too (placeholders of ghosts and remote players before their
+        // account is known): no profile, so it keeps its own name instead of showing "Driver -5".
+        if (id <= 0) {
+            names << QStringLiteral("%1=(none)").arg(id);
+            continue;
+        }
         MinimalProfile* p = resp.add_profiles();
         p->set_accountid(id);
         const QString name = egsPlayerName(id);
         p->set_name(name.toStdString());
         if (const auto f = db::fame(id)) {
             p->mutable_accountprogression()->set_xp(f->xp);
+        }
+        if (const auto m = db::clubMembership(id)) {
+            p->set_clubid(m->clubId);
         }
         names << QStringLiteral("%1=%2").arg(id).arg(name);
     }
@@ -212,9 +232,18 @@ void aggregatedProfiles(Context&, const GetAggregatedProfilesRequest& req,
         if (!known) {
             id = accountIdFor(name);
         }
-        AccountRef* a = resp.add_profiles()->mutable_account();
+        AggregatedProfile* p = resp.add_profiles();
+        AccountRef* a = p->mutable_account();
         a->set_id(id);
         a->set_name(name.toStdString());
+        if (const auto m = db::clubMembership(id)) {
+            p->mutable_club()->set_id(m->clubId);
+        }
+        if (const auto f = db::fame(id)) {
+            p->mutable_progression()->set_xp(f->xp);
+            p->set_stars(f->stars.value_or(0));
+            p->set_elite(f->elite.value_or(0));
+        }
         found << QStringLiteral("%1=%2%3").arg(name).arg(id).arg(known ? QString()
                                                                        : QStringLiteral(" (new)"));
     }
@@ -223,6 +252,12 @@ void aggregatedProfiles(Context&, const GetAggregatedProfilesRequest& req,
 
 void friends(Context& ctx, const GetFriendsRequest&, GetFriendsResponse& resp) {
     const QString me = egsSessionName(ctx.sessionKey);
+    // Latest use of any session per player; 0 (never) may keep the game from listing a friend as
+    // playing. shortcut: ms since epoch is a guess at the unit the game expects.
+    QHash<QString, qint64> seen;
+    for (const EgsSessionInfo& s : egsSessions()) {
+        seen[s.name] = qMax(seen.value(s.name), s.lastSeen);
+    }
     QStringList names;
     for (const EgsPlayerInfo& p : egsPlayers()) {
         if (p.name == me) {
@@ -230,7 +265,7 @@ void friends(Context& ctx, const GetFriendsRequest&, GetFriendsResponse& resp) {
         }
         FriendAccount* a = resp.add_friends()->mutable_account();
         a->set_id(p.accountId);
-        a->set_lastseen(0); // unit unknown (seconds or ms); 0 = not seen
+        a->set_lastseen(seen.value(p.name));
         a->set_name(p.name.toStdString());
         names << p.name;
     }
@@ -286,6 +321,16 @@ qint64 sessionAccount(const Context& ctx, QString* name = nullptr) {
     return s ? s->accountId : 0;
 }
 
+// A club's fame is its members' fame summed (shortcut: the game's own club fame, earned while in the
+// club, is not reported to the server).
+qint64 clubFame(qint64 clubId) {
+    qint64 xp = 0;
+    for (const db::ClubMember& m : db::clubMembers(clubId)) {
+        xp += db::fame(m.accountId).value_or(db::Fame{}).xp;
+    }
+    return xp;
+}
+
 void getFame(Context& ctx, const Empty&, GetFameResponse& resp) {
     QString name;
     const qint64 account = sessionAccount(ctx, &name);
@@ -300,7 +345,10 @@ void getFame(Context& ctx, const Empty&, GetFameResponse& resp) {
     if (f.elite) {
         a->set_elite(*f.elite);
     }
-    resp.mutable_clubprogression()->set_xp(0); // clubs are not implemented yet
+    resp.set_stars(f.stars.value_or(0));
+    resp.set_elite(f.elite.value_or(0));
+    const auto membership = account ? db::clubMembership(account) : std::nullopt;
+    resp.mutable_clubprogression()->set_xp(membership ? clubFame(membership->clubId) : 0);
     qCInfo(lcEgs).noquote() << "fame of" << (name.isEmpty() ? QStringLiteral("?") : name) << "->"
                             << (found ? QString::number(f.xp) : QStringLiteral("none stored (0)"));
 }
@@ -398,6 +446,1034 @@ void getRemoteUrl(Context& ctx, const GetRemoteUrlRequest& req, GetRemoteUrlResp
                             << url;
 }
 
+// Pushed messages: the game's long poll on /egs/messaging reads an XML stream of
+// <msg t="Type" s="Size">base64 protobuf</msg>, decodes the content as the descriptor message named
+// by t and hands it to the handler registered under that name (LobbyCallbackMessage, ...).
+// The poll carries no session, so players are told apart by the runtime's X-Dccoop-Online-Id.
+// The poll is a persistent stream (the game's EvoSliccPersistentAction): it must stay open, ending it
+// counts as losing the server. Open streams get messages at once; others are queued until the next.
+struct PushQueues {
+    QMutex mutex;
+    QHash<QString, QByteArrayList> byName; // lower-case online id -> pending <msg> elements
+    QHash<QString, std::function<bool(const QByteArray&)>> streams; // lower-case online id -> writer
+};
+
+PushQueues& pushQueues() {
+    static PushQueues q;
+    return q;
+}
+
+void push(const QString& name, const gp::Message& message) {
+    const QByteArray payload = QByteArray::fromStdString(message.SerializeAsString()).toBase64();
+    const QByteArray element = QStringLiteral("<msg t=\"%1\" s=\"%2\">")
+                                   .arg(qs(message.GetDescriptor()->name()))
+                                   .arg(payload.size())
+                                   .toUtf8() +
+                               payload + "</msg>";
+    qCInfo(lcEgs).noquote() << "push to" << name << qs(message.GetDescriptor()->name()) << "-"
+                            << qs(message.ShortDebugString());
+    QMutexLocker lock(&pushQueues().mutex);
+    const QString key = name.toLower();
+    const auto stream = pushQueues().streams.constFind(key);
+    if (stream != pushQueues().streams.constEnd() && (*stream)(element)) {
+        return;
+    }
+    pushQueues().streams.remove(key);
+    pushQueues().byName[key].append(element);
+}
+
+// Starts the persistent messaging stream of one player: replaces an older one, flushes what was
+// queued, and keeps the connection busy with a line break every 5 s.
+void openStream(const QString& name, const std::function<bool(const QByteArray&)>& write) {
+    const QString key = name.toLower();
+    {
+        QMutexLocker lock(&pushQueues().mutex);
+        pushQueues().streams.insert(key, write);
+        const QByteArray pending = pushQueues().byName.take(key).join();
+        if (!pending.isEmpty()) {
+            write(pending);
+        }
+    }
+    qCInfo(lcEgs).noquote() << "messaging stream opened for" << name;
+    auto* ping = new QTimer;
+    QObject::connect(ping, &QTimer::timeout, [ping, key, write, name] {
+        if (write("\n")) {
+            return;
+        }
+        qCInfo(lcEgs).noquote() << "messaging stream closed for" << name;
+        {
+            QMutexLocker lock(&pushQueues().mutex);
+            pushQueues().streams.remove(key);
+        }
+        ping->stop();
+        ping->deleteLater();
+    });
+    ping->start(5000);
+}
+
+// Lobbies, in memory. A player is in at most one lobby of each type: the game creates a type 1
+// lobby by itself after login and a type 0 one for a private lobby, and asks for each by type.
+// shortcut: no persistence, no limits; action numbers for the pushes are guesses (env overrides).
+struct LobbyMemberState {
+    qint64 accountId = 0;
+    QString username;
+    bool host = false;
+    QByteArray contentRestriction;
+    QByteArray memberData;
+};
+
+struct LobbyState {
+    QString id;
+    int type = 0;
+    int status = 0;
+    QString name;
+    qint64 matchSlotId = 0; // an event lobby: the slot (race) it runs and its event list
+    qint64 eventListId = 0;
+    QList<LobbyMemberState> members;
+};
+
+struct Lobbies {
+    QMutex mutex;
+    QList<LobbyState> list;
+};
+
+Lobbies& lobbies() {
+    static Lobbies l;
+    return l;
+}
+
+int envInt(const char* name, int fallback) {
+    const QByteArray v = qgetenv(name);
+    bool ok = false;
+    const int n = v.toInt(&ok);
+    return ok ? n : fallback;
+}
+
+LobbyMemberState memberFor(const QByteArray& sessionKey) {
+    QMutexLocker lock(&sessions().mutex);
+    const auto it = sessions().byKey.constFind(sessionKey);
+    LobbyMemberState m;
+    if (it != sessions().byKey.constEnd()) {
+        m.accountId = it->accountId;
+        m.username = it->name;
+    }
+    return m;
+}
+
+void fillLobby(const LobbyState& state, Lobby* out) {
+    out->set_id(state.id.toStdString());
+    out->set_lobbytype(static_cast<LobbyType>(state.type));
+    out->set_status(static_cast<LobbyStatus>(state.status));
+    out->set_name(state.name.toStdString());
+    out->set_matchslotid(state.matchSlotId);
+    out->set_eventlistid(state.eventListId);
+    int playerNumber = 0;
+    for (const LobbyMemberState& m : state.members) {
+        LobbyMember* lm = out->add_memberslist();
+        lm->mutable_sessionkey()->set_accountid(m.accountId);
+        lm->mutable_sessionkey()->set_username(m.username.toStdString());
+        lm->set_host(m.host);
+        lm->set_contentrestriction(m.contentRestriction.toStdString());
+        lm->mutable_sessionkey()->set_contentrestriction(m.contentRestriction.toStdString());
+        if (!m.memberData.isEmpty()) {
+            lm->set_memberdata(m.memberData.toStdString());
+        }
+        lm->set_team(0);
+        lm->set_accountid(m.accountId);
+        lm->set_playernumber(playerNumber++);
+        lm->set_clientversion("CV_bM_tP_p128_x3");
+        lm->set_aicontrolled(false);
+    }
+}
+
+QString describe(const LobbyState& state) {
+    QStringList names;
+    for (const LobbyMemberState& m : state.members) {
+        names << (m.host ? m.username + QStringLiteral("*") : m.username);
+    }
+    return QStringLiteral("%1 type %2 [%3]").arg(state.id).arg(state.type).arg(names.join(", "));
+}
+
+// Removes the account from the lobbies that match (by id, else by type, -1 = any; empty lobbies go,
+// a host leaving hands over); returns them as they are afterwards. Call with lobbies().mutex held.
+QList<LobbyState> leaveAll(qint64 accountId, int type = -1, const QString& id = {}) {
+    QList<LobbyState> left;
+    for (auto it = lobbies().list.begin(); it != lobbies().list.end();) {
+        if ((!id.isEmpty() && it->id != id) || (id.isEmpty() && type >= 0 && it->type != type)) {
+            ++it;
+            continue;
+        }
+        const qsizetype before = it->members.size();
+        bool wasHost = false;
+        for (qsizetype i = it->members.size() - 1; i >= 0; --i) {
+            if (it->members[i].accountId == accountId) {
+                wasHost = it->members[i].host;
+                it->members.removeAt(i);
+            }
+        }
+        if (it->members.size() == before) {
+            ++it;
+            continue;
+        }
+        if (wasHost && !it->members.isEmpty()) {
+            it->members.first().host = true;
+        }
+        left << *it;
+        if (it->members.isEmpty()) {
+            it = lobbies().list.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return left;
+}
+
+// Tells the other members of a lobby what changed.
+void pushLobby(const LobbyState& state, int action, qint64 except) {
+    LobbyCallbackMessage msg;
+    msg.set_action(static_cast<LobbyAction>(action));
+    fillLobby(state, msg.mutable_lobby());
+    for (const LobbyMemberState& m : state.members) {
+        if (m.accountId != except) {
+            push(m.username, msg);
+        }
+    }
+}
+
+void createLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
+    LobbyMemberState me = memberFor(ctx.sessionKey);
+    me.host = true;
+    me.contentRestriction = QByteArray::fromStdString(req.member().contentrestriction());
+    LobbyState state;
+    state.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    state.type = req.lobby().lobbytype();
+    state.name = qs(req.lobby().name());
+    state.members << me;
+    QList<LobbyState> left;
+    {
+        QMutexLocker lock(&lobbies().mutex);
+        left = leaveAll(me.accountId, state.type);
+        lobbies().list << state;
+    }
+    for (const LobbyState& l : left) {
+        pushLobby(l, envInt("DCCOOP_ACTION_LEAVE", 6), me.accountId);
+    }
+    fillLobby(state, resp.add_lobbies());
+    qCInfo(lcEgs).noquote() << "lobby created:" << describe(state);
+}
+
+void joinLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
+    LobbyMemberState me = memberFor(ctx.sessionKey);
+    // joinWithAccount (joining a friend's session) sends the joiner's content in extraJoinDetails;
+    // the game turns away a lobby whose entry for it has none and tries again.
+    me.contentRestriction = QByteArray::fromStdString(req.has_member() ? req.member().contentrestriction()
+                                                                       : req.extrajoindetails().contentrestriction());
+    const qint64 targetId = req.accounttojoin().id();
+    const QString targetName = qs(req.accounttojoin().name());
+    const QString lobbyId = qs(req.lobby().id());
+    qCInfo(lcEgs).noquote() << "join request from" << me.username << "-" << qs(req.ShortDebugString());
+    LobbyState joined;
+    bool found = false;
+    {
+        QMutexLocker lock(&lobbies().mutex);
+        for (LobbyState& l : lobbies().list) {
+            if (req.lobby().has_lobbytype() && l.type != req.lobby().lobbytype()) {
+                continue;
+            }
+            bool match = !lobbyId.isEmpty() && l.id == lobbyId;
+            for (const LobbyMemberState& m : l.members) {
+                if ((targetId && m.accountId == targetId) ||
+                    (!targetName.isEmpty() && m.username.compare(targetName, Qt::CaseInsensitive) == 0)) {
+                    match = true;
+                }
+            }
+            if (!match) {
+                continue;
+            }
+            bool already = false;
+            for (const LobbyMemberState& m : l.members) {
+                already = already || m.accountId == me.accountId;
+            }
+            if (!already) {
+                // Leave my other lobby of this type first (the game made one for me at login).
+                const QString target = l.id;
+                const int type = l.type;
+                for (LobbyState& other : lobbies().list) {
+                    if (other.id != target && other.type == type) {
+                        for (qsizetype i = other.members.size() - 1; i >= 0; --i) {
+                            if (other.members[i].accountId == me.accountId) {
+                                other.members.removeAt(i);
+                            }
+                        }
+                    }
+                }
+                lobbies().list.removeIf([](const LobbyState& s) { return s.members.isEmpty(); });
+                for (LobbyState& again : lobbies().list) {
+                    if (again.id == target) {
+                        again.members << me;
+                        joined = again;
+                    }
+                }
+            } else {
+                for (LobbyMemberState& m : l.members) {
+                    if (m.accountId == me.accountId && !me.contentRestriction.isEmpty()) {
+                        m.contentRestriction = me.contentRestriction;
+                    }
+                }
+                joined = l;
+            }
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        qCWarning(lcEgs).noquote() << "join: no lobby for" << qs(req.ShortDebugString());
+        return;
+    }
+    fillLobby(joined, resp.add_lobbies());
+    qCInfo(lcEgs).noquote() << "lobby joined by" << me.username << ":" << describe(joined);
+    pushLobby(joined, envInt("DCCOOP_ACTION_JOIN", 4), me.accountId);
+    // The joiner keeps showing the session it made at login (and opens no peer connection) until the
+    // lobby is pushed to it as well, as an invitation does (egsLobbyInvitation).
+    const QString joiner = me.username;
+    QTimer::singleShot(std::chrono::seconds(2), [joined, joiner] {
+        LobbyCallbackMessage msg;
+        msg.set_action(static_cast<LobbyAction>(envInt("DCCOOP_ACTION_JOIN", 4)));
+        fillLobby(joined, msg.mutable_lobby());
+        push(joiner, msg);
+    });
+}
+
+void getLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
+    const LobbyMemberState me = memberFor(ctx.sessionKey);
+    QMutexLocker lock(&lobbies().mutex);
+    for (const LobbyState& l : lobbies().list) {
+        if (req.lobby().has_lobbytype() && l.type != req.lobby().lobbytype()) {
+            continue;
+        }
+        for (const LobbyMemberState& m : l.members) {
+            if (m.accountId == me.accountId) {
+                fillLobby(l, resp.add_lobbies());
+                return;
+            }
+        }
+    }
+}
+
+// leaveLobby, and removeFromLobby, where the host names the member to kick in accountId (the caller
+// itself when it is missing). The kicked player hears it too, the others as with a leave.
+void leaveLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
+    const LobbyMemberState me = memberFor(ctx.sessionKey);
+    const qint64 who = req.accountid() ? req.accountid() : me.accountId;
+    qCInfo(lcEgs).noquote() << "leave request from" << me.username << "-" << qs(req.ShortDebugString());
+    QList<LobbyState> left;
+    {
+        QMutexLocker lock(&lobbies().mutex);
+        left = leaveAll(who, req.lobby().has_lobbytype() ? req.lobby().lobbytype() : -1, qs(req.lobbyid()));
+    }
+    for (const LobbyState& l : left) {
+        LobbyResult* r = resp.add_results();
+        r->set_lobbyid(l.id.toStdString());
+        qCInfo(lcEgs).noquote() << "lobby left by" << egsPlayerName(who) << (who != me.accountId ? "(kicked by " + me.username + ")" : QString()) << ":" << describe(l);
+        // A kick: the host that kicked keeps showing the player otherwise, so it hears it as well.
+        pushLobby(l, envInt("DCCOOP_ACTION_LEAVE", 6), who != me.accountId ? 0 : me.accountId);
+        if (who != me.accountId) {
+            LobbyCallbackMessage msg;
+            msg.set_action(static_cast<LobbyAction>(envInt("DCCOOP_ACTION_KICKED", 6)));
+            fillLobby(l, msg.mutable_lobby());
+            push(egsPlayerName(who), msg);
+        }
+    }
+}
+
+// joinLobby: the private lobby game joins the room of a lobby it already knows (by id, after the
+// invitation push). Adds the caller, answers with the lobby and tells the other members.
+void joinLobbyById(Context& ctx, const LobbyRequest& req, JoinLobbyResponse& resp) {
+    LobbyMemberState me = memberFor(ctx.sessionKey);
+    const QString id = qs(req.lobby().id());
+    qCInfo(lcEgs).noquote() << "joinLobby from" << me.username << "-" << qs(req.ShortDebugString());
+    LobbyState joined;
+    bool found = false;
+    {
+        QMutexLocker lock(&lobbies().mutex);
+        for (LobbyState& l : lobbies().list) {
+            bool mine = false;
+            for (const LobbyMemberState& m : l.members) {
+                mine = mine || m.accountId == me.accountId;
+            }
+            if ((!id.isEmpty() && l.id == id) || (id.isEmpty() && mine)) {
+                if (!mine) {
+                    l.members << me;
+                }
+                joined = l;
+                found = true;
+                break;
+            }
+        }
+    }
+    if (!found) {
+        qCWarning(lcEgs).noquote() << "joinLobby: no lobby" << id;
+        ctx.status = 404;
+        return;
+    }
+    fillLobby(joined, resp.mutable_lobby());
+    fillLobby(joined, resp.add_lobbies());
+    qCInfo(lcEgs).noquote() << "joinLobby ok:" << describe(joined);
+    pushLobby(joined, envInt("DCCOOP_ACTION_JOIN", 4), me.accountId);
+}
+
+// updateMember: stores what the member reports (its content restriction, the cars and tracks it
+// owns, which decides whether it is eligible for an event) and tells the others when it changed.
+// Pushing only on a change matters: every member answers a push with another updateMember.
+void updateMember(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
+    const LobbyMemberState me = memberFor(ctx.sessionKey);
+    const QString id = qs(req.lobby().id());
+    const qint64 who = req.member().sessionkey().accountid() ? req.member().sessionkey().accountid()
+                                                             : me.accountId;
+    LobbyState changed;
+    bool anyChange = false;
+    {
+        QMutexLocker lock(&lobbies().mutex);
+        for (LobbyState& l : lobbies().list) {
+            if (!id.isEmpty() && l.id != id) {
+                continue;
+            }
+            for (LobbyMemberState& m : l.members) {
+                if (m.accountId != who) {
+                    continue;
+                }
+                if (req.member().has_contentrestriction()) {
+                    const QByteArray cr = QByteArray::fromStdString(req.member().contentrestriction());
+                    anyChange = anyChange || cr != m.contentRestriction;
+                    m.contentRestriction = cr;
+                }
+                if (req.member().has_memberdata()) {
+                    const QByteArray md = QByteArray::fromStdString(req.member().memberdata());
+                    anyChange = anyChange || md != m.memberData;
+                    m.memberData = md;
+                }
+                changed = l;
+            }
+            if (!changed.id.isEmpty()) {
+                break;
+            }
+        }
+    }
+    if (changed.id.isEmpty()) {
+        qCWarning(lcEgs).noquote() << "updateMember: no lobby" << id << "for" << who;
+        getLobby(ctx, req, resp);
+        return;
+    }
+    fillLobby(changed, resp.add_lobbies());
+    qCInfo(lcEgs).noquote() << "member" << who << "updated in" << describe(changed)
+                            << (anyChange ? "(changed, pushing)" : "(unchanged)");
+    if (anyChange) {
+        pushLobby(changed, envInt("DCCOOP_ACTION_UPDATE", 4), who);
+    }
+}
+
+// changeHost ("promote to session leader"): newHost.id names the new host (else the next member takes
+// over). Everyone gets the lobby with the new host.
+void changeHost(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
+    const LobbyMemberState me = memberFor(ctx.sessionKey);
+    const QString id = qs(req.lobby().id());
+    LobbyState changed;
+    bool found = false;
+    {
+        QMutexLocker lock(&lobbies().mutex);
+        for (LobbyState& l : lobbies().list) {
+            if (l.id != id) {
+                continue;
+            }
+            qint64 next = req.newhost().id() ? req.newhost().id() : req.newhost().accountid();
+            for (const LobbyMemberState& m : l.members) {
+                if (!next && m.accountId != me.accountId) {
+                    next = m.accountId;
+                }
+            }
+            if (next) {
+                for (LobbyMemberState& m : l.members) {
+                    m.host = m.accountId == next;
+                }
+            }
+            changed = l;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        qCWarning(lcEgs).noquote() << "changeHost: no lobby" << id;
+        getLobby(ctx, req, resp);
+        return;
+    }
+    fillLobby(changed, resp.add_lobbies());
+    LobbyCallbackMessage msg;
+    msg.set_action(static_cast<LobbyAction>(envInt("DCCOOP_ACTION_HOST", 4)));
+    fillLobby(changed, msg.mutable_lobby());
+    for (const LobbyMember& m : msg.lobby().memberslist()) {
+        if (m.host()) {
+            *msg.mutable_newhost() = m;
+        }
+    }
+    for (const LobbyMemberState& m : changed.members) {
+        push(m.username, msg); // the old host too: it keeps showing itself as leader otherwise
+    }
+    qCInfo(lcEgs).noquote() << "host changed by" << me.username << ":" << describe(changed);
+}
+
+// updateLobby: the host sets the lobby's status (a new host right after a changeHost sets 8) or name;
+// the others hear it from the server, as with every lobby change.
+void updateLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
+    const LobbyMemberState me = memberFor(ctx.sessionKey);
+    const QString id = qs(req.lobby().id());
+    LobbyState changed;
+    bool found = false;
+    {
+        QMutexLocker lock(&lobbies().mutex);
+        for (LobbyState& l : lobbies().list) {
+            if (l.id != id) {
+                continue;
+            }
+            if (req.lobby().has_status()) {
+                l.status = req.lobby().status();
+            }
+            if (req.lobby().has_name() && !req.lobby().name().empty()) {
+                l.name = qs(req.lobby().name());
+            }
+            changed = l;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        getLobby(ctx, req, resp);
+        return;
+    }
+    fillLobby(changed, resp.add_lobbies());
+    pushLobby(changed, envInt("DCCOOP_ACTION_UPDATE", 4), me.accountId);
+    qCInfo(lcEgs).noquote() << "lobby updated by" << me.username << ": status" << changed.status << describe(changed);
+}
+
+// progressToNextRace: an event lobby moves on to the next race of its event list (the next slot id
+// is the next template) and its members hear it with the old slot id; after the last race the
+// lobby stays as it is.
+void nextRace(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
+    qCInfo(lcEgs).noquote() << "progressToNextRace:" << qs(req.ShortDebugString());
+    const QString id = qs(req.lobby().id().empty() ? req.lobbyid() : req.lobby().id());
+    LobbyState changed;
+    qint64 oldSlot = 0;
+    {
+        QMutexLocker lock(&lobbies().mutex);
+        for (LobbyState& l : lobbies().list) {
+            if (l.id != id || !l.matchSlotId) {
+                continue;
+            }
+            const qint64 next = eventListsNextRace(l.matchSlotId);
+            if (next) {
+                oldSlot = l.matchSlotId;
+                l.matchSlotId = next;
+            }
+            changed = l;
+            break;
+        }
+    }
+    if (!oldSlot) {
+        qCInfo(lcEgs).noquote() << "progressToNextRace: no next race for" << id;
+        getLobby(ctx, req, resp);
+        return;
+    }
+    fillLobby(changed, resp.add_lobbies());
+    LobbyCallbackMessage msg;
+    msg.set_action(static_cast<LobbyAction>(envInt("DCCOOP_ACTION_NEXTRACE", 16)));
+    fillLobby(changed, msg.mutable_lobby());
+    msg.set_oldmatchslotid(oldSlot);
+    for (const LobbyMemberState& m : changed.members) {
+        push(m.username, msg);
+    }
+    qCInfo(lcEgs).noquote() << "next race: slot" << oldSlot << "->" << changed.matchSlotId
+                            << describe(changed);
+}
+
+// A slot's start time came: its registered players go into a new event lobby (type 0, like a
+// private lobby, with the slot and event list set) and are pushed into it.
+void startDueEvents() {
+    for (const EventSlot& slot : eventListsTakeDue(QDateTime::currentMSecsSinceEpoch())) {
+        LobbyState state;
+        state.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        state.type = 0;
+        state.matchSlotId = slot.id;
+        state.eventListId = slot.eventList;
+        QList<LobbyState> left;
+        {
+            QMutexLocker lock(&lobbies().mutex);
+            for (const qint64 account : slot.registered) {
+                LobbyMemberState m;
+                m.accountId = account;
+                m.username = egsPlayerName(account);
+                // Their content as their session lobby knows it.
+                for (const LobbyState& l : lobbies().list) {
+                    for (const LobbyMemberState& o : l.members) {
+                        if (o.accountId == account && !o.contentRestriction.isEmpty()) {
+                            m.contentRestriction = o.contentRestriction;
+                        }
+                    }
+                }
+                m.host = state.members.isEmpty();
+                state.members << m;
+                left << leaveAll(account, 0);
+            }
+            lobbies().list << state;
+        }
+        for (const LobbyState& l : left) {
+            pushLobby(l, envInt("DCCOOP_ACTION_LEAVE", 6), 0);
+        }
+        pushLobby(state, envInt("DCCOOP_ACTION_MATCHED", 10), 0);
+        qCInfo(lcEgs).noquote() << "event started: slot" << slot.id << "of event list"
+                                << slot.eventList << describe(state);
+    }
+}
+
+// Known players whose name starts with the typed text.
+void quickSearch(Context&, const QuickSearchRequest& req, QuickSearchResponse& resp) {
+    const QString prefix = qs(req.startswith()).trimmed();
+    const int max = req.maximumentries() > 0 ? req.maximumentries() : 20;
+    for (const EgsPlayerInfo& p : egsPlayers()) {
+        if (resp.accounts_size() >= max) {
+            break;
+        }
+        if (p.name.startsWith(prefix, Qt::CaseInsensitive)) {
+            resp.add_accounts()->set_id(p.accountId);
+        }
+    }
+    qCInfo(lcEgs).noquote() << "quick search" << prefix << "->" << resp.accounts_size();
+}
+
+// statsService.getAccountStats: one set (Tracks, Vehicles, GameModes, Challenges, Overdrive, FaceOff)
+// for one account or club. The game maps each name in columnNames onto one of its stat columns and
+// fails the request (the profile pages keep loading) unless they are there. The values come from the
+// counters the game itself uploads after each event (OTG gamestate stats/V06/player/<id>, keys
+// "<subject>/<category>/<counter>"); a club's are its members' summed.
+//
+// Tracks, Vehicles, GameModes and Challenges are rows named by their subject (track or car id, mode,
+// solo challenge) with one entry: attempts, distance, fame, wins, created, forwarded. Overdrive and
+// FaceOff are one row whose entry lists fixed subjects in the game's own order (each column picks its
+// subject by position).
+namespace {
+QJsonObject statCounts(qint64 accountId) {
+    const auto g = db::gameState(QStringLiteral("stats/V06/player/%1").arg(accountId));
+    return g ? g->counts : QJsonObject{};
+}
+
+QJsonObject clubStatCounts(qint64 clubId) {
+    QJsonObject sum;
+    for (const db::ClubMember& m : db::clubMembers(clubId)) {
+        const QJsonObject c = statCounts(m.accountId);
+        for (auto it = c.begin(); it != c.end(); ++it) {
+            sum[it.key()] = sum.value(it.key()).toInteger() + it.value().toInteger();
+        }
+    }
+    return sum;
+}
+
+// A counter; a penalty's fame ("<subject>/overdrive/fame/-") counts as negative.
+qint64 statCounter(const QJsonObject& counts, const QString& subject, const QString& category,
+                   const QString& counter) {
+    const QString key = subject + '/' + category + '/' + counter;
+    if (counts.contains(key)) {
+        return counts.value(key).toInteger();
+    }
+    return -counts.value(key + QStringLiteral("/-")).toInteger();
+}
+} // namespace
+
+void accountStats(Context& ctx, const GetAccountStatsRequest& req, GetAccountStatsResponse& resp) {
+    const QString set = qs(req.columndefinitionsetname());
+    QJsonObject counts;
+    QString owner;
+    if (req.clubs_size() > 0 || req.currentclub()) {
+        const qint64 club = req.clubs_size() > 0 ? req.clubs(0).id()
+                                                 : db::clubMembership(sessionAccount(ctx)).value_or(db::ClubMember{}).clubId;
+        counts = clubStatCounts(club);
+        owner = QStringLiteral("club %1").arg(club);
+    } else {
+        const qint64 account = req.accounts_size() > 0 ? req.accounts(0).id() : sessionAccount(ctx);
+        counts = statCounts(account);
+        owner = QStringLiteral("account %1").arg(account);
+    }
+
+    struct Fixed { const char* column; const char* subject; const char* counter; };
+    static const Fixed overdrive[] = {
+        {"PositionGainedTotalFame", "UniquePosition", "fame"}, {"PositionGainedAttempts", "UniquePosition", "attempts"},
+        {"SectorAccuracyTotalFame", "Sector Accuracy", "fame"}, {"SectorAccuracyAttempts", "Sector Accuracy", "attempts"},
+        {"CleanLapTotalFame", "CleanLap", "fame"}, {"CleanLapAttempts", "CleanLap", "attempts"},
+        {"CleanRaceTotalFame", "CleanRace", "fame"}, {"CleanRaceAttempts", "CleanRace", "attempts"},
+        {"CleanSectorTotalFame", "CleanSector", "fame"}, {"CleanSectorAttempts", "CleanSector", "attempts"},
+        {"CrazySpeedTotalFame", "Crazy Speed", "fame"}, {"CrazySpeedAttempts", "Crazy Speed", "attempts"},
+        {"DraftTotalFame", "Drafting", "fame"}, {"DraftAttempts", "Drafting", "attempts"},
+        {"DriftOverdriveTotalFame", "Drift", "fame"}, {"DriftOverdriveAttempts", "Drift", "attempts"},
+        {"VehicleCollisionTotalFame", "VehicleCollision", "fame"}, {"VehicleCollisionAttempts", "VehicleCollision", "attempts"},
+        {"EnvironmentCollisionTotalFame", "EnvironmentCollision", "fame"},
+        {"EnvironmentCollisionAttempts", "EnvironmentCollision", "attempts"},
+        {"FinishPositionTotalFame", "FinishPosition", "fame"}, {"FinishPositionAttempts", "FinishPosition", "attempts"},
+        {"OffTrackTotalFame", "OffTrack", "fame"}, {"OffTrackAttempts", "OffTrack", "attempts"}};
+    static const Fixed faceoff[] = {
+        {"AverageSpeedTotalFame", "Average Speed Face-Off", "fame"}, {"AverageSpeedAttempts", "Average Speed Face-Off", "attempts"},
+        {"AverageSpeedWins", "Average Speed Face-Off", "wins"},
+        {"CorneringTotalFame", "Cornering Face-Off", "fame"}, {"CorneringAttempts", "Cornering Face-Off", "attempts"},
+        {"CorneringWins", "Cornering Face-Off", "wins"},
+        {"DriftTotalFame", "Drift Face-Off", "fame"}, {"DriftAttempts", "Drift Face-Off", "attempts"},
+        {"DriftWins", "Drift Face-Off", "wins"}};
+
+    if (set == "Overdrive" || set == "FaceOff") {
+        const bool od = set == "Overdrive";
+        const Fixed* first = od ? std::begin(overdrive) : std::begin(faceoff);
+        const Fixed* last = od ? std::end(overdrive) : std::end(faceoff);
+        AccountStat* row = resp.add_stats();
+        row->set_total(1);
+        row->mutable_definition()->set_name(set.toStdString());
+        StatEntry* entry = row->add_entries();
+        for (const Fixed* f = first; f != last; ++f) {
+            resp.add_columnnames(f->column);
+            entry->add_columns(statCounter(counts, f->subject, od ? "overdrive" : "faceoff", f->counter));
+        }
+    } else {
+        static const char* const columns[] = {"Attempts", "TotalDistanceDriven", "TotalFame", "Wins", "Created", "Forwarded"};
+        static const char* const counters[] = {"attempts", "distance", "fame", "wins", "created", "forwarded"};
+        const QString category = set == "Tracks" ? "track" : set == "Vehicles" ? "vehicle"
+                               : set == "GameModes" ? "event" : "solochallenge";
+        for (const char* c : columns) {
+            resp.add_columnnames(c);
+        }
+        const QString suffix = '/' + category + '/';
+        QStringList subjects;
+        for (auto it = counts.begin(); it != counts.end(); ++it) {
+            const qsizetype at = it.key().indexOf(suffix);
+            if (at > 0 && !subjects.contains(it.key().left(at))) {
+                subjects << it.key().left(at);
+            }
+        }
+        for (const QString& subject : subjects) {
+            AccountStat* row = resp.add_stats();
+            row->set_total(1);
+            row->mutable_definition()->set_name(subject.toStdString());
+            StatEntry* entry = row->add_entries();
+            for (const char* counter : counters) {
+                entry->add_columns(statCounter(counts, subject, category, counter));
+            }
+        }
+    }
+    qCInfo(lcEgs).noquote() << "stats" << set << "for" << owner << "(" << egsSessionName(ctx.sessionKey)
+                            << ") ->" << resp.stats_size() << "rows";
+}
+
+// clubService. Clubs live in the database; a player is in at most one club. The creator is the
+// owner (member type 2), others join as members (type 1). shortcut: join requests are granted at
+// once, invitations are stored but not pushed, club fame (xp) is not counted yet.
+
+constexpr int ClubOwner = 2;
+constexpr int ClubMemberType = 1;
+constexpr int ClubActive = 1;
+constexpr qsizetype ClubMaxMembers = 6;
+
+QString rfc3339(qint64 ms) {
+    return QDateTime::fromMSecsSinceEpoch(ms, QTimeZone::UTC)
+        .toString(QStringLiteral("yyyy-MM-ddTHH:mm:ss.zzzZ"));
+}
+
+bool accountOnline(qint64 accountId) {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (const EgsSessionInfo& s : egsSessions()) {
+        if (s.accountId == accountId && now - s.lastSeen < 2 * 60 * 1000) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void fillCustomization(const db::Club& c, ClubCustomization* out) {
+    const QJsonObject& j = c.customization;
+    out->set_id(c.id);
+    if (j.contains(QStringLiteral("liveryDescriptor"))) {
+        out->set_liverydescriptor(j.value(QStringLiteral("liveryDescriptor")).toString().toStdString());
+    }
+    for (const QJsonValue& v : j.value(QStringLiteral("layers")).toArray()) {
+        const QJsonObject l = v.toObject();
+        ClubLayer* layer = out->add_layers();
+        layer->set_scale(float(l.value(QStringLiteral("scale")).toDouble(1.0)));
+        layer->set_image(l.value(QStringLiteral("image")).toString().toStdString());
+        for (const QJsonValue& color : l.value(QStringLiteral("colors")).toArray()) {
+            layer->add_colors(color.toString().toStdString());
+        }
+    }
+    for (const QJsonValue& t : j.value(QStringLiteral("tags")).toArray()) {
+        out->add_tags(t.toString().toStdString());
+    }
+}
+
+void fillClub(const db::Club& c, ::Club* out) {
+    const QList<db::ClubMember> members = db::clubMembers(c.id);
+    out->set_id(c.id);
+    out->set_name(c.name.toStdString());
+    out->set_historicalname(c.name.toStdString());
+    out->set_membership(static_cast<GenericEnum>(c.membership));
+    out->set_clubstatus(static_cast<GenericEnum>(ClubActive));
+    out->set_size(int(members.size()));
+    out->set_createdon(rfc3339(c.created).toStdString());
+    for (const db::ClubMember& m : members) {
+        ClubMember* cm = out->add_clubmembers();
+        cm->set_account(m.accountId);
+        cm->set_online(accountOnline(m.accountId));
+        cm->set_type(static_cast<GenericEnum>(m.type));
+        cm->set_createdon(rfc3339(m.joined).toStdString());
+        cm->set_mvp(false);
+    }
+    fillCustomization(c, out->mutable_customization());
+    out->mutable_progression()->set_xp(clubFame(c.id));
+}
+
+// Takes a player out of their club; an owner hands the club to the longest member, the last one
+// out closes it.
+void leaveClub(qint64 accountId) {
+    const auto membership = db::clubMembership(accountId);
+    if (!membership) {
+        return;
+    }
+    db::removeClubMember(accountId);
+    const QList<db::ClubMember> rest = db::clubMembers(membership->clubId);
+    if (rest.isEmpty()) {
+        db::removeClub(membership->clubId);
+        qCInfo(lcEgs).noquote() << "club" << membership->clubId << "closed (last member left)";
+    } else if (membership->type == ClubOwner) {
+        db::ClubMember next = rest.first();
+        next.type = ClubOwner;
+        db::putClubMember(next);
+    }
+}
+
+bool joinClub(qint64 accountId, qint64 clubId, int type) {
+    const auto c = db::club(clubId);
+    if (!c || db::clubMembers(clubId).size() >= ClubMaxMembers) {
+        return false;
+    }
+    if (const auto current = db::clubMembership(accountId); current && current->clubId == clubId) {
+        return true;
+    }
+    leaveClub(accountId);
+    return db::putClubMember({accountId, clubId, type, 0});
+}
+
+void createClub(Context& ctx, const ClubRequest& req, ClubReply& resp) {
+    QString me;
+    const qint64 account = sessionAccount(ctx, &me);
+    const QString name = qs(req.name()).trimmed();
+    if (account == 0 || name.isEmpty()) {
+        ctx.status = 400;
+        return;
+    }
+    db::Club c;
+    c.name = name;
+    c.membership = req.membership();
+    c.created = QDateTime::currentMSecsSinceEpoch();
+    const qint64 id = db::createClub(c);
+    if (id == 0) {
+        ctx.status = 500;
+        return;
+    }
+    leaveClub(account);
+    db::putClubMember({account, id, ClubOwner, c.created});
+    resp.set_id(id);
+    qCInfo(lcEgs).noquote() << "club" << id << name << "created by" << me;
+}
+
+void sanitizeClubName(Context&, const ClubNameMessage& req, ClubNameMessage& resp) {
+    resp.set_name(qs(req.name()).simplified().left(32).toStdString());
+}
+
+void queryClubs(Context&, const QueryClubsRequest& req, QueryClubsResponse& resp) {
+    QList<qint64> ids;
+    for (const qint64 id : req.clubids()) {
+        ids << id;
+    }
+    for (const qint64 account : req.accountids()) {
+        if (const auto m = db::clubMembership(account)) {
+            ids << m->clubId;
+        }
+    }
+    const QList<db::Club> all = db::clubs();
+    for (const std::string& n : req.clubnames()) {
+        for (const db::Club& c : all) {
+            if (c.name.compare(qs(n), Qt::CaseInsensitive) == 0) {
+                ids << c.id;
+            }
+        }
+    }
+    const bool browse = req.clubids_size() == 0 && req.accountids_size() == 0 &&
+                        req.clubnames_size() == 0;
+    const int limit = req.range().numberofresults() > 0 ? req.range().numberofresults() : 50;
+    int added = 0;
+    for (const db::Club& c : all) {
+        if (added >= limit || (!browse && !ids.contains(c.id))) {
+            continue;
+        }
+        fillClub(c, resp.add_clubs());
+        ++added;
+    }
+    qCInfo(lcEgs).noquote() << "clubs query" << qs(req.ShortDebugString()) << "->" << added;
+}
+
+void quickSearchClubs(Context&, const ClubQuickSearchRequest& req, ClubQuickSearchResponse& resp) {
+    const QString prefix = qs(req.startswith());
+    const int limit = req.maximumentries() > 0 ? req.maximumentries() : 20;
+    for (const db::Club& c : db::clubs()) {
+        if (resp.clubs_size() < limit && c.name.startsWith(prefix, Qt::CaseInsensitive)) {
+            resp.add_clubs()->set_id(c.id);
+        }
+    }
+}
+
+void joinClubCall(Context& ctx, const ClubRequest& req, ClubReply& resp) {
+    QString me;
+    const qint64 account = sessionAccount(ctx, &me);
+    if (account == 0 || !joinClub(account, req.id(), ClubMemberType)) {
+        ctx.status = 400;
+        return;
+    }
+    resp.set_id(req.id());
+    qCInfo(lcEgs).noquote() << me << "joined club" << req.id();
+}
+
+void leaveClubCall(Context& ctx, const ClubRequest&, ClubReply& resp) {
+    QString me;
+    const qint64 account = sessionAccount(ctx, &me);
+    const auto m = db::clubMembership(account);
+    leaveClub(account);
+    if (m) {
+        resp.set_id(m->clubId);
+        qCInfo(lcEgs).noquote() << me << "left club" << m->clubId;
+    }
+}
+
+void inviteToClub(Context& ctx, const ClubAccountsRequest& req, Empty&) {
+    QString me;
+    const qint64 account = sessionAccount(ctx, &me);
+    for (const IdOnly& a : req.accounts()) {
+        db::ClubInvite i;
+        i.clubId = req.club().id();
+        i.accountId = a.id();
+        i.invitedBy = account;
+        db::putClubInvite(i);
+        qCInfo(lcEgs).noquote() << me << "invited" << egsPlayerName(a.id()) << "to club"
+                                << req.club().id();
+    }
+}
+
+void findClubInvites(Context& ctx, const FindClubInvitesRequest& req, FindClubInvitesResponse& resp) {
+    QList<qint64> accounts(req.accountids().begin(), req.accountids().end());
+    QList<qint64> clubs(req.clubids().begin(), req.clubids().end());
+    if (accounts.isEmpty() && clubs.isEmpty()) {
+        accounts << sessionAccount(ctx);
+    }
+    for (const db::ClubInvite& i : db::clubInvites()) {
+        if (i.status != 0 || !(accounts.contains(i.accountId) || clubs.contains(i.clubId)) ||
+            !db::club(i.clubId)) {
+            continue;
+        }
+        ClubInvite* out = resp.add_clubinvites();
+        out->set_status(static_cast<GenericEnum>(i.status));
+        out->set_id(i.id);
+        out->set_club(i.clubId);
+        out->set_account(i.accountId);
+        out->set_invitedby(i.invitedBy);
+        out->set_createdon(rfc3339(i.created).toStdString());
+        out->set_updatedon(rfc3339(i.updated).toStdString());
+        out->set_expireson(rfc3339(i.created + qint64(7) * 24 * 3600 * 1000).toStdString());
+    }
+}
+
+void rejectClubInvite(Context& ctx, const ClubRequest& req, Empty&) {
+    const qint64 account = sessionAccount(ctx);
+    for (db::ClubInvite i : db::clubInvites()) {
+        if (i.status == 0 && (i.id == req.id() || (i.clubId == req.id() && i.accountId == account))) {
+            i.status = 2;
+            db::putClubInvite(i);
+        }
+    }
+}
+
+void updateClubMembership(Context& ctx, const ClubRequest& req, ClubReply& resp) {
+    const auto m = db::clubMembership(sessionAccount(ctx));
+    const qint64 clubId = req.id() ? req.id() : (m ? m->clubId : 0);
+    auto c = db::club(clubId);
+    if (!c) {
+        ctx.status = 400;
+        return;
+    }
+    c->membership = req.membership();
+    db::putClub(*c);
+    resp.set_id(c->id);
+    resp.set_membership(req.membership());
+}
+
+void updateClubCustomization(Context& ctx, const UpdateCustomizationRequest& req,
+                             UpdateCustomizationResponse& resp) {
+    const auto m = db::clubMembership(sessionAccount(ctx));
+    const qint64 clubId = req.customization().id() ? req.customization().id()
+                                                   : (m ? m->clubId : 0);
+    auto c = db::club(clubId);
+    if (!c) {
+        ctx.status = 400;
+        return;
+    }
+    const ClubCustomization& in = req.customization();
+    QJsonObject& j = c->customization;
+    if (in.has_liverydescriptor()) {
+        j.insert(QStringLiteral("liveryDescriptor"), qs(in.liverydescriptor()));
+    }
+    if (in.layers_size() > 0) {
+        QJsonArray layers;
+        for (const ClubLayer& l : in.layers()) {
+            QJsonArray colors;
+            for (const std::string& color : l.colors()) {
+                colors.append(qs(color));
+            }
+            layers.append(QJsonObject{{QStringLiteral("scale"), double(l.scale())},
+                                      {QStringLiteral("image"), qs(l.image())},
+                                      {QStringLiteral("colors"), colors}});
+        }
+        j.insert(QStringLiteral("layers"), layers);
+    }
+    if (in.tags_size() > 0) {
+        QJsonArray tags;
+        for (const std::string& t : in.tags()) {
+            tags.append(qs(t));
+        }
+        j.insert(QStringLiteral("tags"), tags);
+    }
+    db::putClub(*c);
+    fillCustomization(*c, resp.add_customizations());
+}
+
+// sessionService.queryStatus: the asked accounts that have a session in use are online.
+void queryStatus(Context&, const QueryStatusRequest& req, QueryStatusResponse& resp) {
+    constexpr qint64 OnlineWindowMs = 2 * 60 * 1000;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    QHash<qint64, QString> online;
+    for (const EgsSessionInfo& s : egsSessions()) {
+        if (now - s.lastSeen < OnlineWindowMs) {
+            online.insert(s.accountId, s.name);
+        }
+    }
+    for (const IdOnly& a : req.accounts()) {
+        if (!online.contains(a.id())) {
+            continue;
+        }
+        LobbySessionKey* k = resp.add_sessions()->mutable_sessionkey();
+        k->set_accountid(a.id());
+        k->set_username(online.value(a.id()).toStdString());
+        resp.add_accounts()->set_id(a.id());
+    }
+}
+
 const QList<Endpoint>& endpoints() {
     static const QList<Endpoint> list = {
         // Registered by the game itself before it has a schema (0xA29400), so not listed.
@@ -450,6 +1526,187 @@ const QList<Endpoint>& endpoints() {
                                                       createBob),
         endpoint<GetRemoteUrlRequest, GetRemoteUrlResponse>("storageService", "getRemoteUrl", false,
                                                             true, getRemoteUrl),
+        endpoint<Empty, GlobalGameConfiguration>(
+            "configurationService", "getGlobalGameConfiguration", false, true,
+            [](Context&, const Empty&, GlobalGameConfiguration& out) {
+                UiConfig* ui = out.mutable_configuration()->mutable_uiconfig();
+                ui->set_enablebuttonchallenge(true);
+                ui->set_enablebuttonchallengecreate(true);
+                ui->set_enablebuttondrive(true);
+                ui->set_enablebuttonmultiplayer(true);
+                ui->set_enablebuttonsingleevent(true);
+                ui->set_enablebuttontour(true);
+                ui->set_enablebuttonfacebook(false);
+                ui->set_betaisactive(false);
+            }),
+        endpoint<LobbyRequest, LobbyList>("lobbyService", "createLobby", false, true, createLobby),
+        endpoint<LobbyRequest, LobbyList>("lobbyService", "joinWithAccount", false, true,
+                                          joinLobby),
+        endpoint<LobbyRequest, LobbyList>("lobbyService", "getLobby", false, true, getLobby),
+        endpoint<LobbyRequest, JoinLobbyResponse>("lobbyService", "joinLobby", false, true,
+                                                  joinLobbyById),
+        endpoint<LobbyRequest, LobbyList>("lobbyService", "leaveLobbyById", false, true,
+                                          leaveLobby),
+        endpoint<LobbyRequest, LobbyList>("lobbyService", "leaveCurrentLobby", false, true,
+                                          leaveLobby),
+        endpoint<LobbyRequest, LobbyList>("lobbyService", "removeFromLobby", false, true,
+                                          leaveLobby),
+        endpoint<LobbyRequest, LobbyList>("lobbyService", "changeHost", false, true, changeHost),
+        endpoint<LobbyRequest, LobbyList>("lobbyService", "progressToNextRace", false, true,
+                                          nextRace),
+        endpoint<LobbyRequest, LobbyList>("lobbyService", "updateMember", false, true,
+                                          updateMember),
+        endpoint<LobbyRequest, LobbyList>("lobbyService", "updateLobby", false, true, updateLobby),
+        // Services the game retries without end while they are missing from the list. The game
+        // reads every field its parser names, so the messages must have them all; they are answered
+        // with defaults. shortcut: real stats, search, feed, notifications and accolades.
+        // Online events: the season's event lists (eventlists.json), their start times (slots) and
+        // who registered for one. At a slot's start its players go into an event lobby. Not listed:
+        // the game stops talking to the server after this season (shortcut: format not complete).
+        // shortcut: everyone registered for a slot races together, no skill or size matching.
+        endpoint<GetCurrentSeasonRequest, GetCurrentSeasonResponse>(
+            "eventService", "getCurrentSeason", false, false,
+            [](Context&, const GetCurrentSeasonRequest&, GetCurrentSeasonResponse& out) {
+                eventListsSeason(out);
+            }),
+        endpoint<QueryUpcomingMatchSlotsRequest, QueryUpcomingMatchSlotsResponse>(
+            "matchingService", "queryUpcomingMatchSlots", false, false,
+            [](Context& ctx, const QueryUpcomingMatchSlotsRequest& req,
+               QueryUpcomingMatchSlotsResponse& out) {
+                qCInfo(lcEgs).noquote() << "matching: queryUpcomingMatchSlots -"
+                                        << qs(req.ShortDebugString());
+                eventListsUpcoming(req, sessionAccount(ctx), out);
+            }),
+        endpoint<QueryInterestRequest, QueryInterestResponse>(
+            "matchingService", "queryInterest", false, false,
+            [](Context& ctx, const QueryInterestRequest& req, QueryInterestResponse& out) {
+                QList<qint64> accounts;
+                for (const IdOnly& a : req.accounts()) {
+                    accounts << a.id();
+                }
+                if (accounts.isEmpty()) {
+                    accounts << sessionAccount(ctx);
+                }
+                const qint64 now = QDateTime::currentMSecsSinceEpoch();
+                QSet<qint64> seen;
+                for (const qint64 a : accounts) {
+                    for (const EventSlot& s : eventListsRegisteredSlots(a)) {
+                        if (seen.contains(s.id)) {
+                            continue;
+                        }
+                        seen.insert(s.id);
+                        InterestSlot* i = out.add_slots();
+                        i->set_startsinseconds(static_cast<int>(qMax<qint64>(0, s.matchTime - now) / 1000));
+                        i->mutable_slot()->set_id(s.id);
+                    }
+                }
+            }),
+        endpoint<MatchingRequest, RegisterInterestResponse>(
+            "matchingService", "registerInterest", false, true,
+            [](Context& ctx, const MatchingRequest& req, RegisterInterestResponse& out) {
+                qCInfo(lcEgs).noquote() << "matching: registerInterest from"
+                                        << egsSessionName(ctx.sessionKey) << "-"
+                                        << qs(req.ShortDebugString());
+                QList<qint64> accounts{sessionAccount(ctx)};
+                for (const qint64 a : req.eligiblepartymembers()) {
+                    if (!accounts.contains(a)) {
+                        accounts << a;
+                    }
+                }
+                const qint64 slotId = req.id() ? req.id() : req.matchslotid();
+                const auto slot = eventListsRegister(slotId, accounts);
+                out.set_registered(slot.has_value());
+                out.mutable_slot()->set_id(slotId);
+                if (!slot) {
+                    qCWarning(lcEgs).noquote() << "matching: unknown slot" << slotId;
+                }
+            }),
+        endpoint<MatchingRequest, RegisterInterestResponse>(
+            "matchingService", "unregisterInterest", false, true,
+            [](Context& ctx, const MatchingRequest& req, RegisterInterestResponse& out) {
+                qCInfo(lcEgs).noquote() << "matching: unregisterInterest from"
+                                        << egsSessionName(ctx.sessionKey) << "-"
+                                        << qs(req.ShortDebugString());
+                eventListsUnregister(sessionAccount(ctx));
+                for (const qint64 a : req.eligiblepartymembers()) {
+                    eventListsUnregister(a);
+                }
+                out.set_registered(false);
+            }),
+        endpoint<MatchingRequest, MarkReadyResponse>(
+            "matchingService", "markReady", false, true,
+            [](Context& ctx, const MatchingRequest& req, MarkReadyResponse& out) {
+                qCInfo(lcEgs).noquote() << "matching: markReady from"
+                                        << egsSessionName(ctx.sessionKey) << "-"
+                                        << qs(req.ShortDebugString());
+                out.set_id(req.matchslotid());
+                out.set_ready(true);
+            }),
+        endpoint<MatchingRequest, MarkReadyResponse>(
+            "matchingService", "markNotReady", false, true,
+            [](Context&, const MatchingRequest& req, MarkReadyResponse& out) {
+                out.set_id(req.matchslotid());
+                out.set_ready(false);
+            }),
+        endpoint<MatchingRequest, QueryMatchSlotsResponse>(
+            "matchingService", "queryMatchSlotsById", false, true,
+            [](Context&, const MatchingRequest& req, QueryMatchSlotsResponse& out) {
+                for (const qint64 id : req.slotids()) {
+                    MatchSlotInfo* s = out.add_slots();
+                    s->set_slotid(id);
+                    s->set_players(eventListsPlayers(id));
+                    s->set_friendsandclubmates(0);
+                }
+            }),
+        endpoint<MatchingRequest, QueryEventListActivityResponse>(
+            "matchingService", "queryEventListActivity", false, true,
+            [](Context&, const MatchingRequest& req, QueryEventListActivityResponse& out) {
+                for (const qint64 id : req.eventlists()) {
+                    EventListActivity* a = out.add_activity();
+                    a->set_eventlist(id);
+                    a->set_players(eventListsActivePlayers(id));
+                }
+            }),
+        endpoint<QuickSearchRequest, QuickSearchResponse>("accountService", "quickSearch", false,
+                                                          true, quickSearch),
+        endpoint<GetActivityFeedRequest, GetActivityFeedResponse>(
+            "activityService", "getActivityFeed", false, true,
+            [](Context&, const GetActivityFeedRequest&, GetActivityFeedResponse&) {}),
+        // Nothing to report yet: answered so the social hub and menu stop waiting.
+        endpoint<GetNotificationsRequest, GetNotificationsResponse>(
+            "activityService", "getNotifications", false, true,
+            [](Context&, const GetNotificationsRequest&, GetNotificationsResponse&) {}),
+        endpoint<GetPlayerAccoladeProgressRequest, GetPlayerAccoladeProgressResponse>(
+            "objectiveService", "getPlayerAccoladeProgress", false, true,
+            [](Context&, const GetPlayerAccoladeProgressRequest&,
+               GetPlayerAccoladeProgressResponse&) {}),
+        endpoint<GetAccountStatsRequest, GetAccountStatsResponse>(
+            "statsService", "getAccountStats", false, true, accountStats),
+        endpoint<QueryStatusRequest, QueryStatusResponse>("sessionService", "queryStatus", false,
+                                                          true, queryStatus),
+        endpoint<ClubRequest, ClubReply>("clubService", "createAndJoin", false, true, createClub),
+        endpoint<ClubNameMessage, ClubNameMessage>("clubService", "sanitize", false, true,
+                                                   sanitizeClubName),
+        endpoint<QueryClubsRequest, QueryClubsResponse>("clubService", "queryClubs", false, true,
+                                                        queryClubs),
+        endpoint<ClubQuickSearchRequest, ClubQuickSearchResponse>("clubService", "quickSearch",
+                                                                  false, true, quickSearchClubs),
+        endpoint<ClubRequest, ClubReply>("clubService", "join", false, true, joinClubCall),
+        endpoint<ClubRequest, ClubReply>("clubService", "requestJoin", false, true, joinClubCall),
+        endpoint<ClubRequest, ClubReply>("clubService", "leave", false, true, leaveClubCall),
+        endpoint<ClubAccountsRequest, Empty>("clubService", "invite", false, true, inviteToClub),
+        endpoint<FindClubInvitesRequest, FindClubInvitesResponse>("clubService", "findInvites",
+                                                                  false, true, findClubInvites),
+        endpoint<ClubRequest, Empty>("clubService", "rejectInvite", false, true, rejectClubInvite),
+        endpoint<ClubRequest, Empty>("clubService", "rejectJoinRequest", false, true,
+                                     [](Context&, const ClubRequest&, Empty&) {}),
+        endpoint<ClubRequest, ClubReply>("clubService", "updateMembership", false, true,
+                                         updateClubMembership),
+        endpoint<UpdateCustomizationRequest, UpdateCustomizationResponse>(
+            "clubService", "updateCustomization", false, true, updateClubCustomization),
+        endpoint<GetKeywordsRequest, GetKeywordsResponse>(
+            "keywordService", "getKeywords", false, true,
+            [](Context&, const GetKeywordsRequest&, GetKeywordsResponse&) {}),
     };
     return list;
 }
@@ -507,8 +1764,124 @@ QStringList splitPath(QString path) {
 
 } // namespace
 
+// The invitee of a private lobby waits ("Joining lobby") without asking for anything: it waits for the
+// lobby to be pushed. Push the inviter's lobby with the invitee added to both, 2 s after the invite.
+// Tried out by pushing each lobby type and action: lobby type 1 with action 4 makes both games take the lobby as
+// theirs (each answers with updateMember); type 0, and the other actions 0-16, get no reaction.
+// DCCOOP_INVITE_LOBBYTYPE and DCCOOP_ACTION_INVITE override type and action.
+void egsLobbyInvitation(const QString& from, const QString& to) {
+    LobbyState pushed;
+    bool found = false;
+    {
+        QMutexLocker lock(&lobbies().mutex);
+        for (LobbyState& l : lobbies().list) {
+            bool hasFrom = false, hasTo = false;
+            for (const LobbyMemberState& m : l.members) {
+                hasFrom = hasFrom || m.username.compare(from, Qt::CaseInsensitive) == 0;
+                hasTo = hasTo || m.username.compare(to, Qt::CaseInsensitive) == 0;
+            }
+            if (!hasFrom) {
+                continue;
+            }
+            if (!hasTo) {
+                LobbyMemberState invitee;
+                invitee.username = to;
+                invitee.accountId = accountIdFor(to);
+                l.members << invitee;
+            }
+            pushed = l;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        // The inviter has no lobby here (the server restarted since its login): make one.
+        LobbyMemberState host, invitee;
+        host.username = from;
+        host.accountId = accountIdFor(from);
+        host.host = true;
+        invitee.username = to;
+        invitee.accountId = accountIdFor(to);
+        pushed.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        pushed.type = 1;
+        pushed.members << host << invitee;
+        QMutexLocker lock(&lobbies().mutex);
+        lobbies().list << pushed;
+    }
+    pushed.type = envInt("DCCOOP_INVITE_LOBBYTYPE", 1);
+    const int action = envInt("DCCOOP_ACTION_INVITE", 4);
+    qCInfo(lcEgs).noquote() << "invitation" << from << "->" << to << ": pushing" << describe(pushed)
+                            << "action" << action;
+    QTimer::singleShot(std::chrono::seconds(2), [pushed, action] {
+        LobbyCallbackMessage msg;
+        msg.set_action(static_cast<LobbyAction>(action));
+        fillLobby(pushed, msg.mutable_lobby());
+        for (const LobbyMemberState& m : pushed.members) {
+            push(m.username, msg);
+        }
+    });
+}
+
 void setEgsConfig(const EgsConfig& c) {
     config() = c;
+}
+
+QByteArray egsBots(const QString& player, const QString& command) {
+    constexpr int kMaxBots = 7;
+    // By the host's name, not by lobby: a player can be in an old lobby and a new one with the same people,
+    // and host and guests must get the same count (their races must have the same entrants).
+    static QHash<QString, int> botsOfHost;
+    int bots = 0;
+    bool host = false;
+    bool found = false;
+    QStringList peers; // the lobby's other players, whom the runtime sends the bots' states
+    {
+        QMutexLocker lock(&lobbies().mutex);
+        // The private lobby game runs in the session lobby the invitation made; the newest counts.
+        for (auto l = lobbies().list.crbegin(); l != lobbies().list.crend(); ++l) {
+            const auto me = std::find_if(l->members.cbegin(), l->members.cend(), [&player](const LobbyMemberState& m) {
+                return m.username.compare(player, Qt::CaseInsensitive) == 0;
+            });
+            if (l->members.size() < 2 || me == l->members.cend()) {
+                continue;
+            }
+            host = me->host;
+            QString hostName;
+            for (const LobbyMemberState& m : l->members) {
+                if (m.host) {
+                    hostName = m.username.toLower();
+                }
+                if (m.username.compare(player, Qt::CaseInsensitive) != 0) {
+                    peers << m.username;
+                }
+            }
+            int& count = botsOfHost[hostName];
+            if ((command == QLatin1String("more") || command == QLatin1String("less")) && host) {
+                if (command == QLatin1String("less")) {
+                    count = count > 0 ? count - 1 : 0;
+                } else {
+                    count = count < kMaxBots && l->members.size() + count < 12 ? count + 1 : count;
+                }
+                qCInfo(lcEgs).noquote() << player << "set" << count << "bots:" << describe(*l);
+            }
+            bots = count;
+            found = true;
+            break;
+        }
+    }
+    QString note = QStringLiteral("Bots: %1 (up to %2)").arg(bots).arg(kMaxBots);
+    if (!found) {
+        note = QStringLiteral("Bots: be in a private lobby with a friend first");
+    } else if (!host && !command.isEmpty()) {
+        note = QStringLiteral("Bots: %1  (only the host adds them)").arg(bots);
+    }
+    return "count=" + QByteArray::number(bots) + "\nhost=" + (host ? "1" : "0") + "\npeers=" +
+           peers.join(',').toUtf8() + "\nnote=" + note.toUtf8() + '\n';
+}
+void egsStartEvents() {
+    auto* timer = new QTimer;
+    QObject::connect(timer, &QTimer::timeout, [] { startDueEvents(); });
+    timer->start(1000);
 }
 
 QByteArray egsSignature(const QString& method, const QByteArray& sessionKey,
@@ -643,11 +2016,49 @@ QString egsDescribeBody(const QString& path, bool response, int status, const QB
 bool handleEgs(const HttpRequest& request, const QString& endpoint,
                const HttpServer::Responder& respond) {
     if (endpoint == QLatin1String("egs/messaging")) {
-        HttpResponse r;
-        r.contentType = "text/xml";
-        r.body = "<msg t=\"Empty\" s=\"0\"></msg>";
-        r.keepalive = true; // counted in the trace, not logged one by one
-        respond(r);
+        // The game polls this for pushed messages. Answering at once makes it poll several times a second
+        // and, 30 s later, treat the server as lost. Hold the request instead (long poll), shorter than the
+        // game's 15 s receive timeout, and answer as soon as something is queued for this player.
+        const QString name = QString::fromUtf8(request.headers.value("x-dccoop-online-id"));
+        if (!name.isEmpty() && request.headers.contains("x-dccoop-stream")) {
+            HttpResponse r;
+            r.contentType = "application/octet-stream";
+            r.stream = [name](std::function<bool(const QByteArray&)> write) { openStream(name, write); };
+            respond(r);
+            return true;
+        }
+        // Long poll: answer with whatever is queued for this player, or after 10 s with nothing.
+        auto timer = std::make_shared<QTimer>();
+        auto waited = std::make_shared<int>(0);
+        QObject::connect(timer.get(), &QTimer::timeout, [timer, waited, name, respond] {
+            QByteArray pending;
+            if (!name.isEmpty()) {
+                QMutexLocker lock(&pushQueues().mutex);
+                pending = pushQueues().byName.take(name.toLower()).join();
+            }
+            *waited += 250;
+            if (pending.isEmpty() && *waited < 10000) {
+                return;
+            }
+            timer->stop();
+            // Bare <msg> elements as text/xml: the game parses the body as XML only with an XML
+            // content type (otherwise the request counts as failed, 0xc0220002), and then hands
+            // each <msg> to its handler.
+            HttpResponse r;
+            r.contentType = "text/xml";
+            if (pending.isEmpty()) {
+                r.body = "<msg t=\"Empty\" s=\"0\"></msg>";
+                r.keepalive = true; // counted in the trace, not logged one by one
+            } else {
+                r.body = pending;
+                qCInfo(lcEgs).noquote() << "messaging: delivered to" << name << pending.size()
+                                        << "bytes";
+            }
+            respond(r);
+            // Drop the connection (and with it the slot's own reference) once this slot has returned.
+            QTimer::singleShot(0, [timer] { timer->disconnect(); });
+        });
+        timer->start(250);
         return true;
     }
     const QStringList parts = splitPath(endpoint);
@@ -774,8 +2185,18 @@ void egsSetFame(qint64 accountId, qint64 xp) {
                   (quint64(2) << 60) | quint64(f.xp),
                   {},
                   f.updated});
-    qCInfo(lcEgs).noquote() << "fame of" << egsPlayerName(accountId) << "set to" << f.xp
-                            << "(admin)";
+    qCInfo(lcEgs).noquote() << "fame of" << egsPlayerName(accountId) << "set to" << f.xp;
+    egsUpdateClubFameBoard();
+}
+
+void egsUpdateClubFameBoard() {
+    for (const db::Club& c : db::clubs()) {
+        const qint64 xp = clubFame(c.id);
+        if (xp > 0) {
+            db::putScore({QStringLiteral("fame/club"), QString::number(c.id), (quint64(2) << 60) | quint64(xp), {},
+                          QDateTime::currentMSecsSinceEpoch()});
+        }
+    }
 }
 
 QList<EgsSessionInfo> egsSessions() {

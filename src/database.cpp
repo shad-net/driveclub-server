@@ -98,6 +98,34 @@ const char* const Migrations[] = {
     );
     CREATE INDEX ghosts_owner ON ghosts (account_id);
     )",
+    // 5: clubs (clubService), one club per player
+    R"(
+    CREATE TABLE clubs (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        name          TEXT NOT NULL,
+        membership    INTEGER NOT NULL DEFAULT 0,
+        customization TEXT NOT NULL DEFAULT '{}',
+        xp            INTEGER NOT NULL DEFAULT 0,
+        created       INTEGER NOT NULL
+    );
+    CREATE INDEX clubs_name ON clubs (name COLLATE NOCASE);
+    CREATE TABLE club_members (
+        account_id INTEGER PRIMARY KEY,
+        club_id    INTEGER NOT NULL,
+        type       INTEGER NOT NULL DEFAULT 1,
+        joined     INTEGER NOT NULL
+    );
+    CREATE INDEX club_members_club ON club_members (club_id);
+    CREATE TABLE club_invites (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        club_id    INTEGER NOT NULL,
+        account_id INTEGER NOT NULL,
+        invited_by INTEGER NOT NULL,
+        status     INTEGER NOT NULL DEFAULT 0,
+        created    INTEGER NOT NULL,
+        updated    INTEGER NOT NULL
+    );
+    )",
 };
 
 QMutex& lock() {
@@ -688,6 +716,192 @@ QList<Ghost> ghosts() {
     if (run(q, "list ghosts")) {
         while (q.next()) {
             out.append(ghostFrom(q));
+        }
+    }
+    return out;
+}
+
+// Clubs
+
+namespace {
+Club clubFrom(const QSqlQuery& q) {
+    Club c;
+    c.id = q.value(0).toLongLong();
+    c.name = q.value(1).toString();
+    c.membership = q.value(2).toInt();
+    c.customization = QJsonDocument::fromJson(q.value(3).toString().toUtf8()).object();
+    c.xp = q.value(4).toLongLong();
+    c.created = q.value(5).toLongLong();
+    return c;
+}
+constexpr char ClubColumns[] = "id, name, membership, customization, xp, created";
+
+ClubMember clubMemberFrom(const QSqlQuery& q) {
+    ClubMember m;
+    m.accountId = q.value(0).toLongLong();
+    m.clubId = q.value(1).toLongLong();
+    m.type = q.value(2).toInt();
+    m.joined = q.value(3).toLongLong();
+    return m;
+}
+constexpr char ClubMemberColumns[] = "account_id, club_id, type, joined";
+
+QString jsonText(const QJsonObject& o) {
+    return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
+}
+} // namespace
+
+qint64 createClub(const Club& c) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral(
+        "INSERT INTO clubs (name, membership, customization, xp, created) VALUES (?, ?, ?, ?, ?)"));
+    q.addBindValue(text(c.name));
+    q.addBindValue(c.membership);
+    q.addBindValue(jsonText(c.customization));
+    q.addBindValue(c.xp);
+    q.addBindValue(c.created ? c.created : now());
+    return run(q, "create club") ? q.lastInsertId().toLongLong() : 0;
+}
+
+bool putClub(const Club& c) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral(
+        "UPDATE clubs SET name = ?, membership = ?, customization = ?, xp = ? WHERE id = ?"));
+    q.addBindValue(text(c.name));
+    q.addBindValue(c.membership);
+    q.addBindValue(jsonText(c.customization));
+    q.addBindValue(c.xp);
+    q.addBindValue(c.id);
+    return run(q, "save club");
+}
+
+std::optional<Club> club(qint64 id) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT %1 FROM clubs WHERE id = ?").arg(QLatin1String(ClubColumns)));
+    q.addBindValue(id);
+    if (run(q, "read club") && q.next()) {
+        return clubFrom(q);
+    }
+    return std::nullopt;
+}
+
+QList<Club> clubs() {
+    QList<Club> out;
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT %1 FROM clubs ORDER BY xp DESC, id ASC")
+                  .arg(QLatin1String(ClubColumns)));
+    if (run(q, "list clubs")) {
+        while (q.next()) {
+            out.append(clubFrom(q));
+        }
+    }
+    return out;
+}
+
+bool removeClub(qint64 id) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    bool ok = true;
+    for (const char* table : {"club_members", "club_invites"}) {
+        q.prepare(QStringLiteral("DELETE FROM %1 WHERE club_id = ?").arg(QLatin1String(table)));
+        q.addBindValue(id);
+        ok = run(q, "remove club data") && ok;
+    }
+    q.prepare(QStringLiteral("DELETE FROM clubs WHERE id = ?"));
+    q.addBindValue(id);
+    return run(q, "remove club") && ok;
+}
+
+bool putClubMember(const ClubMember& m) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("INSERT OR REPLACE INTO club_members (account_id, club_id, type, "
+                             "joined) VALUES (?, ?, ?, ?)"));
+    q.addBindValue(m.accountId);
+    q.addBindValue(m.clubId);
+    q.addBindValue(m.type);
+    q.addBindValue(m.joined ? m.joined : now());
+    return run(q, "save club member");
+}
+
+bool removeClubMember(qint64 accountId) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("DELETE FROM club_members WHERE account_id = ?"));
+    q.addBindValue(accountId);
+    return run(q, "remove club member") && q.numRowsAffected() > 0;
+}
+
+std::optional<ClubMember> clubMembership(qint64 accountId) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT %1 FROM club_members WHERE account_id = ?")
+                  .arg(QLatin1String(ClubMemberColumns)));
+    q.addBindValue(accountId);
+    if (run(q, "read club membership") && q.next()) {
+        return clubMemberFrom(q);
+    }
+    return std::nullopt;
+}
+
+QList<ClubMember> clubMembers(qint64 clubId) {
+    QList<ClubMember> out;
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT %1 FROM club_members WHERE club_id = ? ORDER BY joined")
+                  .arg(QLatin1String(ClubMemberColumns)));
+    q.addBindValue(clubId);
+    if (run(q, "list club members")) {
+        while (q.next()) {
+            out.append(clubMemberFrom(q));
+        }
+    }
+    return out;
+}
+
+qint64 putClubInvite(const ClubInvite& i) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    const qint64 t = now();
+    if (i.id == 0) {
+        q.prepare(QStringLiteral("INSERT INTO club_invites (club_id, account_id, invited_by, status, "
+                                 "created, updated) VALUES (?, ?, ?, ?, ?, ?)"));
+        q.addBindValue(i.clubId);
+        q.addBindValue(i.accountId);
+        q.addBindValue(i.invitedBy);
+        q.addBindValue(i.status);
+        q.addBindValue(i.created ? i.created : t);
+        q.addBindValue(t);
+        return run(q, "create club invite") ? q.lastInsertId().toLongLong() : 0;
+    }
+    q.prepare(QStringLiteral("UPDATE club_invites SET status = ?, updated = ? WHERE id = ?"));
+    q.addBindValue(i.status);
+    q.addBindValue(t);
+    q.addBindValue(i.id);
+    return run(q, "update club invite") ? i.id : 0;
+}
+
+QList<ClubInvite> clubInvites() {
+    QList<ClubInvite> out;
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT id, club_id, account_id, invited_by, status, created, updated "
+                             "FROM club_invites ORDER BY id"));
+    if (run(q, "list club invites")) {
+        while (q.next()) {
+            ClubInvite i;
+            i.id = q.value(0).toLongLong();
+            i.clubId = q.value(1).toLongLong();
+            i.accountId = q.value(2).toLongLong();
+            i.invitedBy = q.value(3).toLongLong();
+            i.status = q.value(4).toInt();
+            i.created = q.value(5).toLongLong();
+            i.updated = q.value(6).toLongLong();
+            out.append(i);
         }
     }
     return out;

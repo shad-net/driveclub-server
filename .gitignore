@@ -6,3 +6,4 @@ build/
 config.json
 
 /.vs/
+out/

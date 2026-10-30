@@ -17,30 +17,40 @@ if(MSVC)
     add_compile_options(/utf-8)
 endif()
 
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/externals/protobuf/CMakeLists.txt")
-    message(FATAL_ERROR "externals/protobuf is empty: run `git submodule update --init --recursive`")
+# An installed protobuf (e.g. MSYS2's mingw-w64-clang-x86_64-protobuf) instead of building the submodule.
+option(DRIVECLUB_SYSTEM_PROTOBUF "Use an installed protobuf instead of externals/protobuf" OFF)
+if(DRIVECLUB_SYSTEM_PROTOBUF)
+    find_package(Protobuf CONFIG REQUIRED)
+    set(EGS_PROTOC protobuf::protoc)
+    set(EGS_PROTOBUF_INCLUDE "")
+    set(EGS_PROTOBUF_LIB protobuf::libprotobuf)
+else()
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/externals/protobuf/CMakeLists.txt")
+        message(FATAL_ERROR "externals/protobuf is empty: run `git submodule update --init --recursive`")
+    endif()
+    add_subdirectory(externals)
+    set(EGS_PROTOC protoc)
+    set(EGS_PROTOBUF_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/externals/protobuf/src")
+    set(EGS_PROTOBUF_LIB libprotobuf)
 endif()
-add_subdirectory(externals)
 
 set(EGS_PROTO "${CMAKE_CURRENT_SOURCE_DIR}/proto/egs.proto")
 set(EGS_PROTO_OUT "${CMAKE_CURRENT_BINARY_DIR}/proto_gen")
 file(MAKE_DIRECTORY "${EGS_PROTO_OUT}")
 add_custom_command(
     OUTPUT "${EGS_PROTO_OUT}/egs.pb.cc" "${EGS_PROTO_OUT}/egs.pb.h"
-    COMMAND $<TARGET_FILE:protoc>
+    COMMAND $<TARGET_FILE:${EGS_PROTOC}>
             "--proto_path=${CMAKE_CURRENT_SOURCE_DIR}/proto"
             "--cpp_out=${EGS_PROTO_OUT}"
             "${EGS_PROTO}"
-    DEPENDS "${EGS_PROTO}" protoc
+    DEPENDS "${EGS_PROTO}" ${EGS_PROTOC}
     COMMENT "Generating EGS protobuf sources"
     VERBATIM)
 
 # Generated code gets its own target so the strict warning flags below don't apply to it.
 add_library(egs_proto STATIC "${EGS_PROTO_OUT}/egs.pb.cc" "${EGS_PROTO_OUT}/egs.pb.h")
-target_include_directories(egs_proto PUBLIC
-    "${EGS_PROTO_OUT}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/externals/protobuf/src")
-target_link_libraries(egs_proto PUBLIC libprotobuf)
+target_include_directories(egs_proto PUBLIC "${EGS_PROTO_OUT}" ${EGS_PROTOBUF_INCLUDE})
+target_link_libraries(egs_proto PUBLIC ${EGS_PROTOBUF_LIB})
 
 add_executable(driveclubsrv
     src/admin_service.cpp src/admin_service.h
@@ -48,6 +58,7 @@ add_executable(driveclubsrv
     src/config.cpp src/config.h
     src/database.cpp src/database.h
     src/egs.cpp src/egs.h
+    src/eventlists.cpp src/eventlists.h src/content_ids.h
     src/file_log.cpp src/file_log.h
     src/handler.cpp src/handler.h
     src/http_server.cpp src/http_server.h

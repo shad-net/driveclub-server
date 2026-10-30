@@ -6,6 +6,7 @@
 #include "auth.h"
 #include "database.h"
 #include "egs.h"
+#include "eventlists.h"
 
 #include <QDateTime>
 #include <QHash>
@@ -262,9 +263,61 @@ HttpResponse gameStateJson(const db::GameState& g) {
     }));
 }
 
+// The game never reports its fame by itself (profileService.updateFame is not called): a player's
+// total is the event fame in their stats gamestate, which the fame leaderboard and levels show.
+// XP boost: lower-case player name -> factor for the event fame they upload.
+QMutex& xpBoostMutex() {
+    static QMutex m;
+    return m;
+}
+QHash<QString, int>& xpBoosts() {
+    static QHash<QString, int> h;
+    return h;
+}
+
+int xpBoostOf(qint64 accountId) {
+    QMutexLocker lock(&xpBoostMutex());
+    return xpBoosts().value(egsPlayerName(accountId).toLower(), 1);
+}
+
+void fameFromStats(const db::GameState& g) {
+    static const QRegularExpression player(QStringLiteral("^stats/V\\d+/player/(\\d+)$"));
+    const QRegularExpressionMatch m = player.match(g.resource);
+    if (!m.hasMatch()) {
+        return;
+    }
+    qint64 fame = 0;
+    for (auto it = g.counts.constBegin(); it != g.counts.constEnd(); ++it) {
+        if (it.key().endsWith(QLatin1String("/event/fame"))) {
+            fame += it.value().toInteger();
+        }
+    }
+    const qint64 account = m.captured(1).toLongLong();
+    if (fame > db::fame(account).value_or(db::Fame{}).xp) {
+        egsSetFame(account, fame);
+    }
+}
+
 HttpResponse handleGameState(const HttpRequest& request, const QString& resource) {
     if (request.method == "GET") {
-        const auto g = db::gameState(resource);
+        auto g = db::gameState(resource);
+        // A club's stats and accolades the game never uploads: its members' counters summed.
+        static const QRegularExpression clubState(QStringLiteral("^(\\w+/V\\d+)/club/(\\d+)$"));
+        if (const QRegularExpressionMatch m = clubState.match(resource); !g && m.hasMatch()) {
+            db::GameState sum{resource, 1, {}, 0};
+            for (const db::ClubMember& member : db::clubMembers(m.captured(2).toLongLong())) {
+                const auto own = db::gameState(QStringLiteral("%1/player/%2").arg(m.captured(1)).arg(member.accountId));
+                if (!own) {
+                    continue;
+                }
+                for (auto it = own->counts.constBegin(); it != own->counts.constEnd(); ++it) {
+                    sum.counts.insert(it.key(), sum.counts.value(it.key()).toInteger() + it.value().toInteger());
+                }
+            }
+            if (!sum.counts.isEmpty()) {
+                g = sum;
+            }
+        }
         if (!g) {
             qCInfo(lcOtg).noquote()
                 << "gamestate" << resource << "-> none yet (404, game defaults)";
@@ -274,6 +327,7 @@ HttpResponse handleGameState(const HttpRequest& request, const QString& resource
         }
         qCInfo(lcOtg).noquote() << "gamestate" << resource << "-> version" << g->version << "with"
                                 << g->counts.size() << "counters";
+        fameFromStats(*g);
         return gameStateJson(*g);
     }
     if (request.method != "POST" && request.method != "PUT") {
@@ -288,10 +342,19 @@ HttpResponse handleGameState(const HttpRequest& request, const QString& resource
                                 << "but stored is" << g.version << "(applied anyway)";
     }
     QStringList changes;
+    static const QRegularExpression statsOf(QStringLiteral("^stats/V\\d+/player/(\\d+)$"));
+    const QRegularExpressionMatch statsMatch = statsOf.match(resource);
+    const int boost = statsMatch.hasMatch() ? xpBoostOf(statsMatch.captured(1).toLongLong()) : 1;
+    bool eventDone = false; // Mode_<mode>/event/attempts went up: the player finished an event
     for (const QJsonValue& t : body.value(QStringLiteral("transactions")).toArray()) {
         const QJsonObject deltas = t.toObject().value(QStringLiteral("deltas")).toObject();
         for (auto it = deltas.constBegin(); it != deltas.constEnd(); ++it) {
-            const qint64 delta = it.value().toInteger();
+            qint64 delta = it.value().toInteger();
+            if (boost > 1 && delta > 0 && it.key().endsWith(QLatin1String("/event/fame"))) {
+                delta *= boost; // XP boost: the event's fame counts more
+            }
+            eventDone = eventDone || (delta > 0 && it.key().startsWith(QLatin1String("Mode_")) &&
+                                      it.key().endsWith(QLatin1String("/event/attempts")));
             const qint64 value = std::max<qint64>(0, g.counts.value(it.key()).toInteger() + delta);
             g.counts.insert(it.key(), value);
             changes << QStringLiteral("%1 %2%3 = %4")
@@ -303,6 +366,11 @@ HttpResponse handleGameState(const HttpRequest& request, const QString& resource
     ++g.version;
     g.updated = QDateTime::currentMSecsSinceEpoch();
     db::putGameState(g);
+    fameFromStats(g);
+    static const QRegularExpression playerStats(QStringLiteral("^stats/V\\d+/player/(\\d+)$"));
+    if (const QRegularExpressionMatch m = playerStats.match(resource); eventDone && m.hasMatch()) {
+        eventListsRaceFinished(egsPlayerName(m.captured(1).toLongLong()));
+    }
     qCInfo(lcOtg).noquote() << "gamestate" << resource << "-> version" << g.version << ":"
                             << (changes.isEmpty() ? QStringLiteral("no changes")
                                                   : changes.join(QStringLiteral(", ")));
@@ -313,6 +381,26 @@ HttpResponse handleGameState(const HttpRequest& request, const QString& resource
 
 void setOtgConfig(const OtgConfig& c) {
     config() = c;
+}
+
+QByteArray otgXpBoost(const QString& player, const QString& command) {
+    QMutexLocker lock(&xpBoostMutex());
+    int& factor = xpBoosts()[player.toLower()];
+    if (factor < 1) {
+        factor = 1;
+    }
+    if (command == QLatin1String("toggle")) {
+        factor = factor > 1 ? 1 : 2;
+        qCInfo(lcOtg).noquote() << "XP boost of" << player << (factor > 1 ? "on (x2)" : "off");
+    }
+    return factor > 1 ? QByteArrayLiteral("XP boost: on (x2 fame)") : QByteArrayLiteral("XP boost: off");
+}
+
+void otgFameFromStats() {
+    for (const db::GameState& g : db::gameStates()) {
+        fameFromStats(g);
+    }
+    egsUpdateClubFameBoard();
 }
 
 QString otgBaseUrl(const HttpRequest& request) {
