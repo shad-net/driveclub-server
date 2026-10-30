@@ -17,6 +17,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QRegularExpression>
 #include <QTimer>
 #include <QUdpSocket>
 #include <QUrl>
@@ -59,14 +60,18 @@ QStringList online() {
     return state().onlinePlayers ? state().onlinePlayers() : QStringList();
 }
 
+void registerOn(const QString& target);
+
+// list_on may name several servers, separated by commas or spaces: this one is listed on each.
 void registerOnList() {
-    QString target = state().config.listOn.trimmed();
-    if (target.isEmpty()) {
-        return;
+    const QStringList targets =
+        state().config.listOn.split(QRegularExpression(QStringLiteral("[,;\\s]+")), Qt::SkipEmptyParts);
+    for (const QString& target : targets) {
+        registerOn(target.contains(QLatin1Char(':')) ? target : target + QStringLiteral(":8080"));
     }
-    if (!target.contains(QLatin1Char(':'))) {
-        target += QStringLiteral(":8080");
-    }
+}
+
+void registerOn(const QString& target) {
     QUrl url(QStringLiteral("http://%1/dccoop/servers/register").arg(target));
     QUrlQuery q;
     q.addQueryItem(QStringLiteral("name"), serverName());
@@ -78,16 +83,16 @@ void registerOnList() {
     request.setTransferTimeout(5000);
     QNetworkReply* reply = net->get(request);
     QObject::connect(reply, &QNetworkReply::finished, reply, [reply, target] {
-        static bool failedBefore = false;
+        static QHash<QString, bool> failedBefore; // per list server: logged when it changes
         const bool failed = reply->error() != QNetworkReply::NoError;
-        if (failed != failedBefore) {
+        if (!failedBefore.contains(target) || failed != failedBefore.value(target)) {
             if (failed) {
                 qCWarning(lcServers).noquote() << "cannot register on the server list at" << target << ":"
                                                << reply->errorString();
             } else {
                 qCInfo(lcServers).noquote() << "listed on the server list at" << target;
             }
-            failedBefore = failed;
+            failedBefore.insert(target, failed);
         }
         reply->deleteLater();
     });

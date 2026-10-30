@@ -16,7 +16,7 @@
 
 struct ServerListConfig {
     QString name;   // server.name: what the browser shows; empty = this computer's name
-    QString listOn; // server.list_on: "host[:port]" of a server to be listed on, empty = none
+    QString listOn; // server.list_on: "host[:port]" of the servers to be listed on (comma-separated), empty = none
     quint16 port = 8080;
 };
 
