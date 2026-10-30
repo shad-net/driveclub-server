@@ -217,6 +217,13 @@ bool open(const QString& path, QString* error) {
         d.commit();
         qCInfo(lcDb).noquote() << "database schema updated to version" << v + 1;
     }
+    // Before 0.0.5 the alias "i_am_special" (the caller) was stored as a literal entrant, so one
+    // player's row could be answered as another's. Such rows cannot be given back to their owner.
+    if (q.exec(QStringLiteral("DELETE FROM scores WHERE entrant = 'i_am_special'")) &&
+        q.numRowsAffected() > 0) {
+        qCInfo(lcDb).noquote() << "removed" << q.numRowsAffected()
+                               << "leaderboard entries stored as \"i_am_special\"";
+    }
     return true;
 }
 

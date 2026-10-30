@@ -114,8 +114,28 @@ QString tokenOwner(const HttpRequest& request) {
     return it->name;
 }
 
-// Leaderboards
+QString callerEntrant(const HttpRequest& request) {
+    const QByteArray value = request.headers.value("authorization");
+    if (!value.startsWith("Bearer ")) {
+        return {};
+    }
+    QString name;
+    {
+        QMutexLocker lock(&tokens().mutex);
+        const auto it = tokens().byToken.constFind(QString::fromLatin1(value.mid(7)).trimmed());
+        if (it == tokens().byToken.constEnd()) {
+            return {};
+        }
+        name = it->name;
+    }
+    const auto player = db::playerByName(name);
+    return player ? QString::number(player->accountId) : QString();
+}
 
+// "i_am_special" stands for the caller
+const QString IAmSpecial = QStringLiteral("i_am_special");
+
+// Leaderboards
 using Entry = db::Score;
 
 QJsonValue scoreJson(quint64 score) {
@@ -163,15 +183,26 @@ HttpResponse readBoard(const HttpRequest& request, const QString& name) {
     QByteArray nextToken;
 
     if (method == QLatin1String("select")) {
-        const QStringList wanted =
+        // entrants=a,b,c; "i_am_special" is the caller, answered under that name.
+        QStringList wanted =
             request.query.queryItemValue(QStringLiteral("entrants")).split(',', Qt::SkipEmptyParts);
+        const bool special = wanted.removeAll(IAmSpecial) > 0;
+        const QString me = special ? callerEntrant(request) : QString();
         for (qsizetype i = 0; i < list.size(); ++i) {
-            if (wanted.contains(list.at(i).entrant)) {
+            if (!me.isEmpty() && list.at(i).entrant == me) {
+                QJsonObject row = entryJson(list.at(i), i + 1);
+                row.insert(QStringLiteral("entrant"),
+                           QJsonObject{{QStringLiteral("id"), IAmSpecial}});
+                out.append(row);
+            } else if (wanted.contains(list.at(i).entrant)) {
                 out.append(entryJson(list.at(i), i + 1));
             }
         }
     } else if (method == QLatin1String("nearby")) {
-        const QString who = request.query.queryItemValue(QStringLiteral("entrant"));
+        QString who = request.query.queryItemValue(QStringLiteral("entrant"));
+        if (who == IAmSpecial) {
+            who = callerEntrant(request);
+        }
         const int n = count > 0 ? count : 10;
         qsizetype at = -1;
         for (qsizetype i = 0; i < list.size(); ++i) {
@@ -187,7 +218,6 @@ HttpResponse readBoard(const HttpRequest& request, const QString& name) {
             }
         }
     } else {
-        // page (default): count entries from offset <from>
         const int n = count > 0 ? count : 50;
         const qsizetype from =
             std::max(0, request.query.queryItemValue(QStringLiteral("from")).toInt());
@@ -227,6 +257,15 @@ HttpResponse writeBoard(const HttpRequest& request, const QString& name, bool la
         e.score = o.value(QStringLiteral("score")).toVariant().toULongLong();
         e.attachment = o.value(QStringLiteral("attachment")).toArray();
         e.updated = QDateTime::currentMSecsSinceEpoch();
+        if (e.entrant == IAmSpecial) {
+            e.entrant = callerEntrant(request);
+            if (e.entrant.isEmpty()) {
+                qCWarning(lcOtg).noquote() << "score" << name
+                                           << "for i_am_special from an unknown "
+                                              "token: not stored";
+                continue;
+            }
+        }
         if (e.entrant.isEmpty()) {
             continue;
         }
@@ -367,7 +406,6 @@ bool handleOtg(const HttpRequest& request, const QString& endpoint,
         return true;
     }
     if (endpoint == QLatin1String("xlogin/driveclub")) {
-        // OTG_Login_Type "fake": no code to check. Refused when unverified logins are not allowed.
         if (!authConfig().shadnetUrl.isEmpty() && !authConfig().allowUnverified) {
             qCWarning(lcOtg) << "fake OTG login refused (shadnet.allow_unverified is off)";
             respond(json(QJsonDocument(QJsonObject{
@@ -379,6 +417,7 @@ bool handleOtg(const HttpRequest& request, const QString& endpoint,
         return true;
     }
 
+    // OTG services
     static const QRegularExpression service(QStringLiteral("^([^/]+)/([^/]+)/(v\\d+)/(.+)$"));
     const auto m = service.match(endpoint);
     if (!m.hasMatch()) {
