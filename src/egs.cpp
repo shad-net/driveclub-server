@@ -1,10 +1,11 @@
-﻿// SPDX-FileCopyrightText: Copyright 2026 Driveclub Custom Server Project
+// SPDX-FileCopyrightText: Copyright 2026 Driveclub Custom Server Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "egs.h"
 
 #include "auth.h"
 #include "database.h"
+#include "eventlists.h"
 // The game reads a field named "slots", which is a Qt macro.
 #pragma push_macro("slots")
 #undef slots
@@ -29,6 +30,7 @@
 #include <QMessageAuthenticationCode>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QSet>
 #include <QStringList>
 #include <QUuid>
 
@@ -519,6 +521,8 @@ struct LobbyState {
     int type = 0;
     int status = 0;
     QString name;
+    qint64 matchSlotId = 0; // an event lobby: the slot (race) it runs and its event list
+    qint64 eventListId = 0;
     QList<LobbyMemberState> members;
 };
 
@@ -555,8 +559,8 @@ void fillLobby(const LobbyState& state, Lobby* out) {
     out->set_lobbytype(static_cast<LobbyType>(state.type));
     out->set_status(static_cast<LobbyStatus>(state.status));
     out->set_name(state.name.toStdString());
-    out->set_matchslotid(0);
-    out->set_eventlistid(0);
+    out->set_matchslotid(state.matchSlotId);
+    out->set_eventlistid(state.eventListId);
     int playerNumber = 0;
     for (const LobbyMemberState& m : state.members) {
         LobbyMember* lm = out->add_memberslist();
@@ -944,11 +948,83 @@ void updateLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
     qCInfo(lcEgs).noquote() << "lobby updated by" << me.username << ": status" << changed.status << describe(changed);
 }
 
-// progressToNextRace: answer with the lobby as it is.
-// shortcut: their changes are not applied yet; the log shows what the game sends.
-void echoLobby(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
-    qCInfo(lcEgs).noquote() << "lobby request (not applied):" << qs(req.ShortDebugString());
-    getLobby(ctx, req, resp);
+// progressToNextRace: an event lobby moves on to the next race of its event list (the next slot id
+// is the next template) and its members hear it with the old slot id; after the last race the
+// lobby stays as it is.
+void nextRace(Context& ctx, const LobbyRequest& req, LobbyList& resp) {
+    qCInfo(lcEgs).noquote() << "progressToNextRace:" << qs(req.ShortDebugString());
+    const QString id = qs(req.lobby().id().empty() ? req.lobbyid() : req.lobby().id());
+    LobbyState changed;
+    qint64 oldSlot = 0;
+    {
+        QMutexLocker lock(&lobbies().mutex);
+        for (LobbyState& l : lobbies().list) {
+            if (l.id != id || !l.matchSlotId) {
+                continue;
+            }
+            const qint64 next = eventListsNextRace(l.matchSlotId);
+            if (next) {
+                oldSlot = l.matchSlotId;
+                l.matchSlotId = next;
+            }
+            changed = l;
+            break;
+        }
+    }
+    if (!oldSlot) {
+        qCInfo(lcEgs).noquote() << "progressToNextRace: no next race for" << id;
+        getLobby(ctx, req, resp);
+        return;
+    }
+    fillLobby(changed, resp.add_lobbies());
+    LobbyCallbackMessage msg;
+    msg.set_action(static_cast<LobbyAction>(envInt("DCCOOP_ACTION_NEXTRACE", 16)));
+    fillLobby(changed, msg.mutable_lobby());
+    msg.set_oldmatchslotid(oldSlot);
+    for (const LobbyMemberState& m : changed.members) {
+        push(m.username, msg);
+    }
+    qCInfo(lcEgs).noquote() << "next race: slot" << oldSlot << "->" << changed.matchSlotId
+                            << describe(changed);
+}
+
+// A slot's start time came: its registered players go into a new event lobby (type 0, like a
+// private lobby, with the slot and event list set) and are pushed into it.
+void startDueEvents() {
+    for (const EventSlot& slot : eventListsTakeDue(QDateTime::currentMSecsSinceEpoch())) {
+        LobbyState state;
+        state.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        state.type = 0;
+        state.matchSlotId = slot.id;
+        state.eventListId = slot.eventList;
+        QList<LobbyState> left;
+        {
+            QMutexLocker lock(&lobbies().mutex);
+            for (const qint64 account : slot.registered) {
+                LobbyMemberState m;
+                m.accountId = account;
+                m.username = egsPlayerName(account);
+                // Their content as their session lobby knows it.
+                for (const LobbyState& l : lobbies().list) {
+                    for (const LobbyMemberState& o : l.members) {
+                        if (o.accountId == account && !o.contentRestriction.isEmpty()) {
+                            m.contentRestriction = o.contentRestriction;
+                        }
+                    }
+                }
+                m.host = state.members.isEmpty();
+                state.members << m;
+                left << leaveAll(account, 0);
+            }
+            lobbies().list << state;
+        }
+        for (const LobbyState& l : left) {
+            pushLobby(l, envInt("DCCOOP_ACTION_LEAVE", 6), 0);
+        }
+        pushLobby(state, envInt("DCCOOP_ACTION_MATCHED", 10), 0);
+        qCInfo(lcEgs).noquote() << "event started: slot" << slot.id << "of event list"
+                                << slot.eventList << describe(state);
+    }
 }
 
 // Known players whose name starts with the typed text.
@@ -1471,23 +1547,73 @@ const QList<Endpoint>& endpoints() {
                                           leaveLobby),
         endpoint<LobbyRequest, LobbyList>("lobbyService", "changeHost", false, true, changeHost),
         endpoint<LobbyRequest, LobbyList>("lobbyService", "progressToNextRace", false, true,
-                                          echoLobby),
+                                          nextRace),
         endpoint<LobbyRequest, LobbyList>("lobbyService", "updateMember", false, true,
                                           updateMember),
         endpoint<LobbyRequest, LobbyList>("lobbyService", "updateLobby", false, true, updateLobby),
         // Services the game retries without end while they are missing from the list. The game
         // reads every field its parser names, so the messages must have them all; they are answered
         // with defaults. shortcut: real stats, search, feed, notifications and accolades.
-        // matchingService: logged so its use can be followed. shortcut: one slot per event id, no
-        // real matchmaking; players counted from everyone registered for the same id.
+        // Online events: the season's event lists (eventlists.json), their start times (slots) and
+        // who registered for one. At a slot's start its players go into an event lobby. Not listed:
+        // the game stops talking to the server after this season (shortcut: format not complete).
+        // shortcut: everyone registered for a slot races together, no skill or size matching.
+        endpoint<GetCurrentSeasonRequest, GetCurrentSeasonResponse>(
+            "eventService", "getCurrentSeason", false, false,
+            [](Context&, const GetCurrentSeasonRequest&, GetCurrentSeasonResponse& out) {
+                eventListsSeason(out);
+            }),
+        endpoint<QueryUpcomingMatchSlotsRequest, QueryUpcomingMatchSlotsResponse>(
+            "matchingService", "queryUpcomingMatchSlots", false, false,
+            [](Context& ctx, const QueryUpcomingMatchSlotsRequest& req,
+               QueryUpcomingMatchSlotsResponse& out) {
+                qCInfo(lcEgs).noquote() << "matching: queryUpcomingMatchSlots -"
+                                        << qs(req.ShortDebugString());
+                eventListsUpcoming(req, sessionAccount(ctx), out);
+            }),
+        endpoint<QueryInterestRequest, QueryInterestResponse>(
+            "matchingService", "queryInterest", false, false,
+            [](Context& ctx, const QueryInterestRequest& req, QueryInterestResponse& out) {
+                QList<qint64> accounts;
+                for (const IdOnly& a : req.accounts()) {
+                    accounts << a.id();
+                }
+                if (accounts.isEmpty()) {
+                    accounts << sessionAccount(ctx);
+                }
+                const qint64 now = QDateTime::currentMSecsSinceEpoch();
+                QSet<qint64> seen;
+                for (const qint64 a : accounts) {
+                    for (const EventSlot& s : eventListsRegisteredSlots(a)) {
+                        if (seen.contains(s.id)) {
+                            continue;
+                        }
+                        seen.insert(s.id);
+                        InterestSlot* i = out.add_slots();
+                        i->set_startsinseconds(static_cast<int>(qMax<qint64>(0, s.matchTime - now) / 1000));
+                        i->mutable_slot()->set_id(s.id);
+                    }
+                }
+            }),
         endpoint<MatchingRequest, RegisterInterestResponse>(
             "matchingService", "registerInterest", false, true,
             [](Context& ctx, const MatchingRequest& req, RegisterInterestResponse& out) {
                 qCInfo(lcEgs).noquote() << "matching: registerInterest from"
                                         << egsSessionName(ctx.sessionKey) << "-"
                                         << qs(req.ShortDebugString());
-                out.set_registered(true);
-                out.mutable_slot()->set_id(req.id() ? req.id() : 1);
+                QList<qint64> accounts{sessionAccount(ctx)};
+                for (const qint64 a : req.eligiblepartymembers()) {
+                    if (!accounts.contains(a)) {
+                        accounts << a;
+                    }
+                }
+                const qint64 slotId = req.id() ? req.id() : req.matchslotid();
+                const auto slot = eventListsRegister(slotId, accounts);
+                out.set_registered(slot.has_value());
+                out.mutable_slot()->set_id(slotId);
+                if (!slot) {
+                    qCWarning(lcEgs).noquote() << "matching: unknown slot" << slotId;
+                }
             }),
         endpoint<MatchingRequest, RegisterInterestResponse>(
             "matchingService", "unregisterInterest", false, true,
@@ -1495,6 +1621,10 @@ const QList<Endpoint>& endpoints() {
                 qCInfo(lcEgs).noquote() << "matching: unregisterInterest from"
                                         << egsSessionName(ctx.sessionKey) << "-"
                                         << qs(req.ShortDebugString());
+                eventListsUnregister(sessionAccount(ctx));
+                for (const qint64 a : req.eligiblepartymembers()) {
+                    eventListsUnregister(a);
+                }
                 out.set_registered(false);
             }),
         endpoint<MatchingRequest, MarkReadyResponse>(
@@ -1518,7 +1648,7 @@ const QList<Endpoint>& endpoints() {
                 for (const qint64 id : req.slotids()) {
                     MatchSlotInfo* s = out.add_slots();
                     s->set_slotid(id);
-                    s->set_players(0);
+                    s->set_players(eventListsPlayers(id));
                     s->set_friendsandclubmates(0);
                 }
             }),
@@ -1528,7 +1658,7 @@ const QList<Endpoint>& endpoints() {
                 for (const qint64 id : req.eventlists()) {
                     EventListActivity* a = out.add_activity();
                     a->set_eventlist(id);
-                    a->set_players(0);
+                    a->set_players(eventListsActivePlayers(id));
                 }
             }),
         endpoint<QuickSearchRequest, QuickSearchResponse>("accountService", "quickSearch", false,
@@ -1688,6 +1818,64 @@ void egsLobbyInvitation(const QString& from, const QString& to) {
 
 void setEgsConfig(const EgsConfig& c) {
     config() = c;
+}
+
+QByteArray egsBots(const QString& player, const QString& command) {
+    constexpr int kMaxBots = 7;
+    // By the host's name, not by lobby: a player can be in an old lobby and a new one with the same people,
+    // and host and guests must get the same count (their races must have the same entrants).
+    static QHash<QString, int> botsOfHost;
+    int bots = 0;
+    bool host = false;
+    bool found = false;
+    QStringList peers; // the lobby's other players, whom the runtime sends the bots' states
+    {
+        QMutexLocker lock(&lobbies().mutex);
+        // The private lobby game runs in the session lobby the invitation made; the newest counts.
+        for (auto l = lobbies().list.crbegin(); l != lobbies().list.crend(); ++l) {
+            const auto me = std::find_if(l->members.cbegin(), l->members.cend(), [&player](const LobbyMemberState& m) {
+                return m.username.compare(player, Qt::CaseInsensitive) == 0;
+            });
+            if (l->members.size() < 2 || me == l->members.cend()) {
+                continue;
+            }
+            host = me->host;
+            QString hostName;
+            for (const LobbyMemberState& m : l->members) {
+                if (m.host) {
+                    hostName = m.username.toLower();
+                }
+                if (m.username.compare(player, Qt::CaseInsensitive) != 0) {
+                    peers << m.username;
+                }
+            }
+            int& count = botsOfHost[hostName];
+            if ((command == QLatin1String("more") || command == QLatin1String("less")) && host) {
+                if (command == QLatin1String("less")) {
+                    count = count > 0 ? count - 1 : 0;
+                } else {
+                    count = count < kMaxBots && l->members.size() + count < 12 ? count + 1 : count;
+                }
+                qCInfo(lcEgs).noquote() << player << "set" << count << "bots:" << describe(*l);
+            }
+            bots = count;
+            found = true;
+            break;
+        }
+    }
+    QString note = QStringLiteral("Bots: %1 (up to %2)").arg(bots).arg(kMaxBots);
+    if (!found) {
+        note = QStringLiteral("Bots: be in a private lobby with a friend first");
+    } else if (!host && !command.isEmpty()) {
+        note = QStringLiteral("Bots: %1  (only the host adds them)").arg(bots);
+    }
+    return "count=" + QByteArray::number(bots) + "\nhost=" + (host ? "1" : "0") + "\npeers=" +
+           peers.join(',').toUtf8() + "\nnote=" + note.toUtf8() + '\n';
+}
+void egsStartEvents() {
+    auto* timer = new QTimer;
+    QObject::connect(timer, &QTimer::timeout, [] { startDueEvents(); });
+    timer->start(1000);
 }
 
 QByteArray egsSignature(const QString& method, const QByteArray& sessionKey,

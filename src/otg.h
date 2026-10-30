@@ -41,6 +41,9 @@ bool otgDropToken(const QString& token);
 void otgRestoreTokens();
 // Takes each player's fame from their stored stats (for stats uploaded before fame was derived).
 void otgFameFromStats();
+// XP boost of a player (by name): event fame they upload counts this many times (1 = off).
+// command "toggle" switches between 1 and 2; the answer is a line for the player's overlay.
+QByteArray otgXpBoost(const QString& player, const QString& command);
 QString otgBoardKind(const QString& name);
 QJsonArray otgBoardList();
 QJsonArray otgChallenges();

@@ -549,6 +549,197 @@ message QueryEventListActivityResponse {
   repeated EventListActivity activity = 1;
 }
 
+// matchingService.queryUpcomingMatchSlots: the next start times of the given event lists. A slot
+// id picks the race: template = id % templates, track = (id / templates) % tracks of that template.
+message QueryUpcomingMatchSlotsRequest {
+  optional int64 startDate = 1;
+  optional int32 numberOfSlots = 2;
+  repeated IdOnly eventLists = 3;
+}
+
+message TeamSize {
+  optional int64 count = 1;
+}
+
+message GameModeConfiguration {
+  optional TeamSize team = 1;
+}
+
+message NameOnly {
+  optional string name = 1;
+}
+
+// The mode of a template: object.name is "Race", "Time Trial", "Drift", "Team Race", "Team Drift",
+// "Team Time Trial" or "TopSpeed".
+message GameModeHolder {
+  optional NameOnly object = 1;
+  optional GameModeConfiguration configuration = 2;
+}
+
+message SlotEvent {
+  optional IdOnly event = 1;
+  optional GameModeHolder gameModeHolder = 2;
+}
+
+message MatchSlot {
+  optional int64 id = 1;
+  optional int64 eventList = 2;
+  optional int64 matchTime = 3; // ms since 1970
+  optional SlotEvent event = 4;
+}
+
+message UpcomingMatchSlot {
+  optional MatchSlot slot = 1;
+  optional int32 players = 2;
+  optional int32 friendsAndClubMates = 3;
+  optional bool registered = 4;
+}
+
+message QueryUpcomingMatchSlotsResponse {
+  repeated UpcomingMatchSlot slots = 1;
+}
+
+// matchingService.queryInterest: the slots the given accounts registered for.
+message QueryInterestRequest {
+  repeated IdOnly accounts = 1;
+}
+
+message InterestSlot {
+  optional int32 startsInSeconds = 1;
+  optional MatchSlotRef slot = 2;
+}
+
+message QueryInterestResponse {
+  repeated InterestSlot slots = 1;
+}
+
+// eventService.getCurrentSeason: the online events. Each event list is a championship: its
+// templates are the races, run one after the other in one lobby.
+
+message GetCurrentSeasonRequest {
+  optional string languageCode = 1;
+}
+
+message EventListObject {
+  optional int64 id = 1;
+  optional string name = 2;
+  optional GenericEnum status = 3;
+  optional GenericEnum type = 4; // EGSConstants.EventListType
+}
+
+message TemplateGeneration {
+  optional int64 loanVehicle = 1;
+  optional int64 timeTrialDuration = 2;
+  optional int64 driftDuration = 3;
+  optional int64 minimumLaps = 4;
+}
+
+message TemplatePlayerCount {
+  optional int64 teamSizeMaximum = 1;
+  optional int64 maximum = 2;
+}
+
+message TemplateSettings {
+  optional string vehicleRequirement = 1;
+}
+
+// weather: Clear, Cloudy, Overcast, Stormy or Random; precipitation e.g. "Dry", "Light
+// Precipitation", "Dry To Wet"; fog: Clear, Light, Heavy or Random.
+message TemplateEnvironment {
+  optional int64 speedOfTime = 1;
+  optional int64 seed = 2;
+  optional float timeOfDayFloat = 3;
+  optional string weather = 4;
+  optional string precipitation = 5;
+  optional float precipitationDuration = 6;
+  optional string fog = 7;
+}
+
+message TemplateConfiguration {
+  optional TemplateGeneration generation = 1;
+  optional TemplatePlayerCount playerCount = 2;
+  optional TemplateSettings settings = 3;
+  optional TemplateEnvironment environment = 4;
+}
+
+message EventTemplate {
+  optional GameModeHolder gameModeHolder = 1;
+  repeated IdOnly tracks = 2;   // newdata/tracks.csv UniqueID
+  repeated IdOnly vehicles = 3; // newdata/vehicles.csv UniqueID, none: any car
+  optional TemplateConfiguration configuration = 4;
+}
+
+message EventListImage {
+  optional int64 billboard = 1;
+  optional int64 eventlistimage = 2;
+}
+
+message EventListMatching {
+  optional int64 interval = 1;
+  optional int64 lockoutTime = 2;
+  optional string repeatPeriod = 3;
+  optional bool schedule = 4;
+  optional int64 nextSlotOffsetSeconds = 5;
+  optional int64 postLobbyTransitionTime = 6;
+  optional int64 postLobbyEventSelectTimer = 7;
+  optional int64 matchedIntoTimeout = 8;
+  optional int64 readyUpTime = 9;
+}
+
+message EventListSettings {
+  optional string eventname = 1;
+  optional string vehicleRequirement = 2;
+  optional string featureOverride = 3;
+  optional bool doubleXP = 4;
+}
+
+message EventListTimers {
+  optional int64 endOfRace = 1;
+  optional int64 eventSelect = 2;
+  optional int64 liveLobby = 3;
+  optional int64 viewResults = 4;
+  optional int64 vehicleSelect = 5;
+  optional int64 mingleTime = 6;
+  optional int64 viewRaceReport = 7;
+}
+
+message EventListColour {
+  optional string eventlistColour = 1;
+}
+
+message EventListConfiguration {
+  optional EventListImage image = 1;
+  optional EventListMatching matching = 2;
+  optional EventListSettings settings = 3;
+  optional EventListTimers timers = 4;
+  optional EventListColour colour = 5;
+}
+
+message EventList {
+  optional EventListObject object = 1;
+  repeated EventTemplate templates = 2;
+  optional EventListConfiguration configuration = 3;
+}
+
+message SeasonBackground {
+  optional string Image = 1;
+  optional string logo = 2;
+}
+
+message SeasonDescription {
+  optional string title = 1;
+}
+
+message SeasonConfiguration {
+  optional SeasonBackground background = 1;
+  optional SeasonDescription description = 2;
+}
+
+message GetCurrentSeasonResponse {
+  repeated EventList eventLists = 1;
+  optional SeasonConfiguration configuration = 2;
+}
+
 // lobbyService (private lobbies). The game reads and writes these by field name through the
 // descriptor above, so names and types matter, numbers do not. Types follow the game's accessors
 // ("is not of Enum/Int64/Bool/Bytes type"); enum values are numbered as the game compares them,

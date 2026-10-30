@@ -19,6 +19,12 @@ struct EgsConfig {
 };
 
 void setEgsConfig(const EgsConfig& config);
+// Starts the online events at their slot times (event lists: eventlists.h).
+void egsStartEvents();
+// Bots in the private lobby the player is in: command "more" (host only) adds one, after the most
+// none. Answer: count=, host= (1: this player hosts), peers= (the other players, comma-separated) and
+// note= (a line for the overlay).
+QByteArray egsBots(const QString& player, const QString& command);
 QByteArray egsSignature(const QString& method, const QByteArray& sessionKey,
                         const QByteArray& body);
 std::optional<QByteArray> egsFindSessionKey(const QString& method, const QByteArray& body,

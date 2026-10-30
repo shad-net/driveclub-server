@@ -6,6 +6,7 @@
 #include "config.h"
 #include "database.h"
 #include "egs.h"
+#include "eventlists.h"
 #include "file_log.h"
 #include "handler.h"
 #include "http_server.h"
@@ -115,6 +116,12 @@ int main(int argc, char* argv[]) {
                                                   ? "http:// + the Host header of each request"
                                                   : qPrintable(config->otg.baseUrl));
     egsRestoreSessions();
+    const QString eventListsPath = configDir.absoluteFilePath(QStringLiteral("eventlists.json"));
+    if (!eventListsLoad(eventListsPath, &error)) {
+        qWarning("%s: %s; using the example event lists", qPrintable(eventListsPath),
+                 qPrintable(error));
+    }
+    egsStartEvents();
     otgRestoreTokens();
     otgFameFromStats();
     startKeepaliveSummaries();

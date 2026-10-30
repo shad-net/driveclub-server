@@ -58,6 +58,7 @@ add_executable(driveclubsrv
     src/config.cpp src/config.h
     src/database.cpp src/database.h
     src/egs.cpp src/egs.h
+    src/eventlists.cpp src/eventlists.h src/content_ids.h
     src/file_log.cpp src/file_log.h
     src/handler.cpp src/handler.h
     src/http_server.cpp src/http_server.h

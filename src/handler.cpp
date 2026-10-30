@@ -5,6 +5,7 @@
 
 #include "database.h"
 #include "egs.h"
+#include "eventlists.h"
 #include "otg.h"
 
 #include <QDateTime>
@@ -278,6 +279,21 @@ static bool handlePsn(const HttpRequest& request, const QString& endpoint,
         }
         r.contentType = "text/plain; charset=utf-8";
         r.body = body;
+    } else if (get && endpoint.startsWith(QLatin1String("dccoop/championship/"))) {
+        // The private lobby championship of a host, for its runtime (polled; ?do=add&block=<hex>,
+        // ?do=toggle, ?do=random&block=<hex>: three random races, started at once).
+        r.contentType = "text/plain; charset=utf-8";
+        r.body = eventListsChampionship(endpoint.mid(20),
+                                        request.query.queryItemValue(QStringLiteral("do")),
+                                        request.query.queryItemValue(QStringLiteral("block")).toLatin1());
+    } else if (get && endpoint.startsWith(QLatin1String("dccoop/xpboost/"))) {
+        // A player's XP boost, for its runtime's online menu (?do=toggle).
+        r.contentType = "text/plain; charset=utf-8";
+        r.body = otgXpBoost(endpoint.mid(15), request.query.queryItemValue(QStringLiteral("do")));
+    } else if (get && endpoint.startsWith(QLatin1String("dccoop/bots/"))) {
+        // Bots in the private lobby a player is in, for its runtime (polled; ?do=more, ?do=less).
+        r.contentType = "text/plain; charset=utf-8";
+        r.body = egsBots(endpoint.mid(12), request.query.queryItemValue(QStringLiteral("do")));
     } else if (get && endpoint.startsWith(QLatin1String("dccoop/avatar/"))) {
         QString name = endpoint.mid(14);
         name.chop(name.endsWith(QLatin1String(".png")) ? 4 : 0);
