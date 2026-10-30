@@ -23,6 +23,7 @@
 #include <QFileInfo>
 #include <QLoggingCategory>
 #include <QSaveFile>
+#include <QStandardPaths>
 
 #include <cstdio>
 
@@ -102,7 +103,34 @@ int main(int argc, char* argv[]) {
     }
 
     const QDir configDir(QFileInfo(configPath).absolutePath());
-    const QString dbPath = configDir.absoluteFilePath(config->databaseFile);
+    QString dbPath = configDir.absoluteFilePath(config->databaseFile);
+    // A bare file name: one database for this Windows user, wherever the server runs from. Each game
+    // folder (a new release, a test copy) used to start with its own, empty one: clubs, fame and ghosts
+    // seemed gone when the host ran the server from another folder. The first time, the folder's own
+    // database is taken over.
+    if (!config->databaseFile.contains(QLatin1Char('/')) && !config->databaseFile.contains(QLatin1Char('\\'))) {
+        const QString sharedDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) +
+                                  QStringLiteral("/driveclub-coop-server");
+        if (QDir().mkpath(sharedDir)) {
+            const QString shared = QDir(sharedDir).absoluteFilePath(config->databaseFile);
+            if (!QFileInfo::exists(shared) && QFileInfo::exists(dbPath)) {
+                bool copied = QFile::copy(dbPath, shared);
+                for (const char* suffix : {"-wal", "-shm"}) {
+                    if (copied && QFileInfo::exists(dbPath + QLatin1String(suffix))) {
+                        copied = QFile::copy(dbPath + QLatin1String(suffix), shared + QLatin1String(suffix));
+                    }
+                }
+                qInfo("took over the database %s as %s%s", qPrintable(dbPath), qPrintable(shared),
+                      copied ? "" : " (copy failed, using the folder's)");
+                if (!copied) {
+                    QFile::remove(shared);
+                }
+            }
+            if (QFileInfo::exists(shared) || !QFileInfo::exists(dbPath)) {
+                dbPath = shared;
+            }
+        }
+    }
     if (!db::open(dbPath, &error)) {
         return fatal(QStringLiteral("cannot open database %1: %2").arg(dbPath, error));
     }
