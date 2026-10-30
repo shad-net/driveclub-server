@@ -15,6 +15,7 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QHash>
+#include <QJsonObject>
 #include <QList>
 #include <QLoggingCategory>
 #include <QMessageAuthenticationCode>
@@ -89,7 +90,6 @@ QString qs(std::string_view s) {
 }
 
 // Endpoints
-
 struct Context {
     const HttpRequest& request;
     QByteArray sessionKey;    // the session this request was signed with, empty before login
@@ -104,7 +104,7 @@ struct Endpoint {
     const gp::Descriptor* request;
     const gp::Descriptor* response;
     bool secure;
-    bool listed;
+    bool listed; // sent in getSvcEndpointList
     std::function<std::string(Context&, const QByteArray&)> run;
 };
 
@@ -245,6 +245,7 @@ void timeInfo(Context&, const Empty&, GetTimeInfoResponse& resp) {
     resp.set_timestamp(QDateTime::currentMSecsSinceEpoch());
 }
 
+// The session a request was signed with, or nullptr (call with sessions().mutex held).
 Session* sessionOf(const Context& ctx) {
     auto it = sessions().byKey.find(ctx.sessionKey);
     return it == sessions().byKey.end() ? nullptr : &*it;
@@ -321,6 +322,7 @@ void updateFame(Context& ctx, const UpdateFameRequest& req, UpdateFameResponse& 
         }
         f.updated = QDateTime::currentMSecsSinceEpoch();
         db::putFame(f);
+        // Keep the OTG fame leaderboard (scores/fame/player) in step: kind 2 = plain points.
         const QString entrant = QString::number(account);
         const quint64 score = (quint64(2) << 60) | quint64(f.xp);
         const auto old = db::score(QStringLiteral("fame/player"), entrant);
@@ -351,10 +353,15 @@ void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& res
     QString name;
     const qint64 account = sessionAccount(ctx, &name);
     const QByteArray data(req.body().data(), static_cast<qsizetype>(req.body().size()));
+    if (account == 0) {
+        ctx.status = 500;
+        qCWarning(lcEgs).noquote()
+            << "ghost upload without a session refused (" << data.size() << "bytes)";
+        return;
+    }
     const QString sent = qs(req.checksum());
     const QString actual = bobChecksum(data);
     if (!sent.isEmpty() && sent != actual) {
-        // Stored anyway, with the checksum we computed: the game checks downloads against it.
         qCWarning(lcEgs).noquote()
             << "ghost from" << name << "has checksum" << sent << "but the data gives" << actual;
     }
@@ -366,9 +373,24 @@ void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& res
     g.accountId = account;
     g.mimeType = qs(req.mimetype());
     g.checksum = actual;
-    const qint64 id = data.isEmpty() ? 0 : db::putGhost(g, data);
+    qint64 id = 0;
+    bool reused = false;
+    if (!data.isEmpty()) {
+        if (const auto same = db::findGhost(account, g.mimeType, actual, data.size())) {
+            QByteArray stored;
+            if (db::ghost(*same, &stored) && stored == data) {
+                id = *same;
+                reused = true;
+                qCInfo(lcEgs).noquote() << "ghost from" << name << "is identical to ghost" << id
+                                        << ", reusing it (" << data.size() << "bytes)";
+            }
+        }
+        if (id == 0) {
+            id = db::putGhost(g, data);
+        }
+    }
     if (id == 0) {
-        ctx.status = 500; // the game marks the upload failed (0x41B6E0) and races on
+        ctx.status = 500;
         qCWarning(lcEgs).noquote()
             << "ghost from" << name << "not stored (" << data.size() << "bytes)";
         return;
@@ -379,8 +401,11 @@ void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& res
     f->set_id(id);
     f->set_publicurl(url.toStdString());
     f->set_checksum(actual.toStdString());
-    qCInfo(lcEgs).noquote() << "ghost" << id << "uploaded by" << name << "," << data.size()
-                            << "bytes, type" << req.objecttype() << "access" << req.accesstype();
+    if (!reused) {
+        qCInfo(lcEgs).noquote() << "ghost" << id << "uploaded by" << name << "," << data.size()
+                                << "bytes, type" << req.objecttype() << "access"
+                                << req.accesstype();
+    }
 }
 
 void getRemoteUrl(Context& ctx, const GetRemoteUrlRequest& req, GetRemoteUrlResponse& resp) {
@@ -396,6 +421,167 @@ void getRemoteUrl(Context& ctx, const GetRemoteUrlRequest& req, GetRemoteUrlResp
     resp.set_checksum(g->checksum.toStdString());
     qCInfo(lcEgs).noquote() << "ghost" << g->id << "of" << egsPlayerName(g->accountId) << "->"
                             << url;
+}
+
+// statsService.getAccountStats
+const QString StatsResource = QStringLiteral("stats/V06/player/%1");
+
+struct StatColumn {
+    const char* name;
+    const char* subject; // fixed subject (Overdrive, FaceOff), else empty: the row's subject
+    const char* counter;
+};
+
+const QList<QPair<QString, QString>>& rowSets() {
+    static const QList<QPair<QString, QString>> sets = {
+        {QStringLiteral("Tracks"), QStringLiteral("track")},
+        {QStringLiteral("Vehicles"), QStringLiteral("vehicle")},
+        {QStringLiteral("GameModes"), QStringLiteral("event")},
+        {QStringLiteral("Challenges"), QStringLiteral("solochallenge")}};
+    return sets;
+}
+const StatColumn RowColumns[] = {
+    {"Attempts", "", "attempts"}, {"TotalDistanceDriven", "", "distance"},
+    {"TotalFame", "", "fame"},    {"Wins", "", "wins"},
+    {"Created", "", "created"},   {"Forwarded", "", "forwarded"}, // no counter seen: 0
+};
+const StatColumn OverdriveColumns[] = {
+    {"PositionGainedTotalFame", "UniquePosition", "fame"},
+    {"PositionGainedAttempts", "UniquePosition", "attempts"},
+    {"SectorAccuracyTotalFame", "Sector Accuracy", "fame"},
+    {"SectorAccuracyAttempts", "Sector Accuracy", "attempts"},
+    {"CleanLapTotalFame", "CleanLap", "fame"},
+    {"CleanLapAttempts", "CleanLap", "attempts"},
+    {"CleanRaceTotalFame", "CleanRace", "fame"},
+    {"CleanRaceAttempts", "CleanRace", "attempts"},
+    {"CleanSectorTotalFame", "CleanSector", "fame"},
+    {"CleanSectorAttempts", "CleanSector", "attempts"},
+    {"CrazySpeedTotalFame", "Crazy Speed", "fame"},
+    {"CrazySpeedAttempts", "Crazy Speed", "attempts"},
+    {"DraftTotalFame", "Drafting", "fame"},
+    {"DraftAttempts", "Drafting", "attempts"},
+    {"DriftOverdriveTotalFame", "Drift", "fame"},
+    {"DriftOverdriveAttempts", "Drift", "attempts"},
+    {"VehicleCollisionTotalFame", "VehicleCollision", "fame"},
+    {"VehicleCollisionAttempts", "VehicleCollision", "attempts"},
+    {"EnvironmentCollisionTotalFame", "EnvironmentCollision", "fame"},
+    {"EnvironmentCollisionAttempts", "EnvironmentCollision", "attempts"},
+    {"FinishPositionTotalFame", "FinishPosition", "fame"},
+    {"FinishPositionAttempts", "FinishPosition", "attempts"},
+    {"OffTrackTotalFame", "OffTrack", "fame"},
+    {"OffTrackAttempts", "OffTrack", "attempts"},
+};
+// Max Speed Face-Off has no fame, attempts or wins columns in the game.
+const StatColumn FaceOffColumns[] = {
+    {"AverageSpeedTotalFame", "Average Speed Face-Off", "fame"},
+    {"AverageSpeedAttempts", "Average Speed Face-Off", "attempts"},
+    {"AverageSpeedWins", "Average Speed Face-Off", "wins"},
+    {"CorneringTotalFame", "Cornering Face-Off", "fame"},
+    {"CorneringAttempts", "Cornering Face-Off", "attempts"},
+    {"CorneringWins", "Cornering Face-Off", "wins"},
+    {"DriftTotalFame", "Drift Face-Off", "fame"},
+    {"DriftAttempts", "Drift Face-Off", "attempts"},
+    {"DriftWins", "Drift Face-Off", "wins"},
+};
+
+qint64 statValue(const QJsonObject& counts, const QString& subject, const QString& category,
+                 const QString& counter) {
+    const QString key = subject + QLatin1Char('/') + category + QLatin1Char('/') + counter;
+    return counts.value(key).toInteger() - counts.value(key + QStringLiteral("/-")).toInteger();
+}
+
+QStringList statSets() {
+    QStringList sets;
+    for (const auto& s : rowSets()) {
+        sets << s.first;
+    }
+    return sets << QStringLiteral("Overdrive") << QStringLiteral("FaceOff");
+}
+
+EgsStatsTable statsTable(qint64 accountId, const QString& set) {
+    EgsStatsTable t;
+    QJsonObject counts;
+    if (const auto g = db::gameState(StatsResource.arg(accountId))) {
+        counts = g->counts;
+        t.stored = true;
+    }
+    const auto fixed = [&](const StatColumn* first, const StatColumn* last,
+                           const QString& category) {
+        QList<qint64> values;
+        for (const StatColumn* c = first; c != last; ++c) {
+            t.columns << QString::fromLatin1(c->name);
+            values << statValue(counts, QString::fromLatin1(c->subject), category,
+                                QString::fromLatin1(c->counter));
+        }
+        t.rows.append({set, values});
+        t.known = true;
+    };
+    if (set == QLatin1String("Overdrive")) {
+        fixed(std::begin(OverdriveColumns), std::end(OverdriveColumns),
+              QStringLiteral("overdrive"));
+        return t;
+    }
+    if (set == QLatin1String("FaceOff")) {
+        fixed(std::begin(FaceOffColumns), std::end(FaceOffColumns), QStringLiteral("faceoff"));
+        return t;
+    }
+    for (const auto& [name, category] : rowSets()) {
+        if (name != set) {
+            continue;
+        }
+        t.known = true;
+        for (const StatColumn& c : RowColumns) {
+            t.columns << QString::fromLatin1(c.name);
+        }
+        const QString marker = QLatin1Char('/') + category + QLatin1Char('/');
+        QStringList subjects;
+        for (auto it = counts.constBegin(); it != counts.constEnd(); ++it) {
+            const qsizetype at = it.key().indexOf(marker);
+            if (at > 0 && !subjects.contains(it.key().left(at))) {
+                subjects << it.key().left(at);
+            }
+        }
+        for (const QString& subject : subjects) {
+            QList<qint64> values;
+            for (const StatColumn& c : RowColumns) {
+                values << statValue(counts, subject, category, QString::fromLatin1(c.counter));
+            }
+            t.rows.append({subject, values});
+        }
+    }
+    return t;
+}
+
+void accountStats(Context& ctx, const GetAccountStatsRequest& req, GetAccountStatsResponse& resp) {
+    const QString set = qs(req.columndefinitionsetname());
+    // Whose stats: an asked account, else the caller. Clubs are not implemented: no rows.
+    const bool club = req.currentclub() || req.clubs_size() > 0;
+    const qint64 account = req.accounts_size() > 0 ? req.accounts(0).id() : sessionAccount(ctx);
+    EgsStatsTable t = statsTable(club ? 0 : account, set);
+    if (club) {
+        t.rows.clear();
+    }
+    if (!t.known) {
+        qCWarning(lcEgs).noquote() << "stats: unknown column set" << set;
+    }
+    for (const QString& c : t.columns) {
+        resp.add_columnnames(c.toStdString());
+    }
+    for (const auto& [name, values] : t.rows) {
+        AccountStat* row = resp.add_stats();
+        row->set_total(1);
+        row->mutable_definition()->set_name(name.toStdString());
+        StatEntry* entry = row->add_entries();
+        for (const qint64 v : values) {
+            entry->add_columns(v);
+        }
+    }
+    qCInfo(lcEgs).noquote() << "stats" << set << "for"
+                            << (club ? QStringLiteral("a club") : egsPlayerName(account)) << "->"
+                            << resp.stats_size() << (resp.stats_size() == 1 ? "row" : "rows")
+                            << (club        ? QStringLiteral("(clubs not implemented)")
+                                : !t.stored ? QStringLiteral("(no stats stored yet)")
+                                            : QString());
 }
 
 const QList<Endpoint>& endpoints() {
@@ -450,6 +636,8 @@ const QList<Endpoint>& endpoints() {
                                                       createBob),
         endpoint<GetRemoteUrlRequest, GetRemoteUrlResponse>("storageService", "getRemoteUrl", false,
                                                             true, getRemoteUrl),
+        endpoint<GetAccountStatsRequest, GetAccountStatsResponse>("statsService", "getAccountStats",
+                                                                  false, true, accountStats),
     };
     return list;
 }
@@ -673,6 +861,7 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
         return true;
     }
 
+    // Runs the handler and sends its answer. `request` is copied: logins finish asynchronously.
     auto run = [e, service, method, sessionKey, respond](const HttpRequest& req,
                                                          const AuthResult& auth) {
         Context ctx{req, sessionKey, {}, 200, auth};
@@ -708,6 +897,8 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
                 run(request, auth);
                 return;
             }
+            // Answers >= 500 are decoded as StatusResult; the login error path reads
+            // retryHint. The X-Service-Error texts are the game's own error strings.
             StatusResult result;
             result.set_retryhint(auth.unavailable ? 30 : 300);
             const std::string out = result.SerializeAsString();
@@ -792,4 +983,12 @@ bool egsDropSession(const QString& key) {
     db::removeSession(key.toLatin1());
     QMutexLocker lock(&sessions().mutex);
     return sessions().byKey.remove(key.toLatin1()) > 0;
+}
+
+QStringList egsStatSets() {
+    return statSets();
+}
+
+EgsStatsTable egsStats(qint64 accountId, const QString& set) {
+    return statsTable(accountId, set);
 }

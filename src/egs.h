@@ -19,6 +19,7 @@ struct EgsConfig {
 };
 
 void setEgsConfig(const EgsConfig& config);
+
 QByteArray egsSignature(const QString& method, const QByteArray& sessionKey,
                         const QByteArray& body);
 std::optional<QByteArray> egsFindSessionKey(const QString& method, const QByteArray& body,
@@ -26,8 +27,6 @@ std::optional<QByteArray> egsFindSessionKey(const QString& method, const QByteAr
 QString egsSessionName(const QByteArray& sessionKey);
 QByteArray egsDescriptor();
 QString egsDescribeBody(const QString& path, bool response, int status, const QByteArray& body);
-
-// Signed-in players, for the admin API.
 struct EgsSessionInfo {
     QString key;
     QString name;
@@ -52,5 +51,15 @@ QList<EgsPlayerInfo> egsPlayers();
 void egsSetPlayerName(qint64 accountId, const QString& name);
 QString egsPlayerName(qint64 accountId);
 void egsSetFame(qint64 accountId, qint64 xp);
+
+struct EgsStatsTable {
+    QStringList columns;
+    QList<QPair<QString, QList<qint64>>> rows;
+    bool known = false;
+    bool stored = false;
+};
+QStringList egsStatSets();
+EgsStatsTable egsStats(qint64 accountId, const QString& set);
+
 bool handleEgs(const HttpRequest& request, const QString& endpoint,
                const HttpServer::Responder& respond);
