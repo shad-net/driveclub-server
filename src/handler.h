@@ -7,3 +7,5 @@
 
 void handleRequest(const HttpRequest& request, const QString& endpoint,
                    const HttpServer::Responder& respond);
+// The players playing now (for the server list).
+QStringList onlinePlayerNames();

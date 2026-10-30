@@ -30,6 +30,8 @@ struct Config {
     QHostAddress adminAddress = QHostAddress::LocalHost;
     quint16 adminPort = 8081;
     QString adminKey;
+    QString serverName;   // server.name: in the launcher's server list, empty = the computer's name
+    QString serverListOn; // server.list_on: "host[:port]" of a server to be listed on, empty = none
 };
 
 std::optional<Config> loadConfig(const QByteArray& json, QString* error);

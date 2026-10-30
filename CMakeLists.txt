@@ -66,6 +66,7 @@ add_executable(driveclubsrv
     src/otg.cpp src/otg.h
     src/proto_dump.cpp src/proto_dump.h
     src/request_log.cpp src/request_log.h
+    src/server_list.cpp src/server_list.h
     src/shadnet_verifier.cpp src/shadnet_verifier.h
     src/trace.cpp src/trace.h
     src/version.cpp src/version.h

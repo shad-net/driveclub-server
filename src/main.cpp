@@ -12,6 +12,7 @@
 #include "http_server.h"
 #include "otg.h"
 #include "request_log.h"
+#include "server_list.h"
 #include "trace.h"
 #include "version.h"
 
@@ -150,6 +151,7 @@ int main(int argc, char* argv[]) {
                  qPrintable(error));
     }
     egsStartEvents();
+    serverListStart({config->serverName, config->serverListOn, config->port}, onlinePlayerNames);
     otgRestoreTokens();
     otgFameFromStats();
     startKeepaliveSummaries();

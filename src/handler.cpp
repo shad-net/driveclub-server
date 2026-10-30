@@ -7,6 +7,7 @@
 #include "egs.h"
 #include "eventlists.h"
 #include "otg.h"
+#include "server_list.h"
 
 #include <QDateTime>
 #include <QHash>
@@ -78,6 +79,16 @@ static bool playerOnline(const QString& name) {
         }
     }
     return false;
+}
+
+QStringList onlinePlayerNames() {
+    QStringList names;
+    for (const db::Player& p : db::players()) {
+        if (p.loggedIn && playerOnline(p.name)) {
+            names << p.name;
+        }
+    }
+    return names;
 }
 
 static QJsonObject presenceOf(const QString& name) {
@@ -286,6 +297,23 @@ static bool handlePsn(const HttpRequest& request, const QString& endpoint,
         r.body = eventListsChampionship(endpoint.mid(20),
                                         request.query.queryItemValue(QStringLiteral("do")),
                                         request.query.queryItemValue(QStringLiteral("block")).toLatin1());
+    } else if (get && endpoint == QLatin1String("dccoop/info")) {
+        // The launcher's server list: name, version, who is playing.
+        r.contentType = "application/json";
+        r.body = serverInfoJson();
+    } else if (get && endpoint == QLatin1String("dccoop/servers")) {
+        r.contentType = "application/json";
+        r.body = serverListJson();
+    } else if (get && endpoint == QLatin1String("dccoop/servers/register")) {
+        // Another server lists itself here (its server.list_on); its address is where it asks from.
+        QHostAddress from = request.peer;
+        if (const auto v4 = from.toIPv4Address(); v4) {
+            from = QHostAddress(v4);
+        }
+        r.contentType = "application/json";
+        r.body = serverListRegister(from.toString(), request.query.queryItemValue(QStringLiteral("name")),
+                                    request.query.queryItemValue(QStringLiteral("port")).toInt(),
+                                    request.query.queryItemValue(QStringLiteral("players")).toInt());
     } else if (get && endpoint.startsWith(QLatin1String("dccoop/result/"))) {
         // A player's place in a private lobby race (?place=N&field=M), from its runtime: answered with
         // the standings of the lobby host's championship, empty when none is on.

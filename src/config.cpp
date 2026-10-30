@@ -154,6 +154,19 @@ std::optional<Config> loadConfig(const QByteArray& json, QString* error) {
     if (!c.adminKey.isEmpty() && c.adminKey.size() < 8) {
         return failed(error, QStringLiteral("admin.key must be at least 8 characters"));
     }
+
+    const QJsonObject server = root.value("server").toObject();
+    c.serverName = server.value("name").toString().trimmed();
+    if (c.serverName.size() > 40) {
+        return failed(error, QStringLiteral("server.name must be at most 40 characters"));
+    }
+    c.serverListOn = server.value("list_on").toString().trimmed();
+    if (c.serverListOn.startsWith(QLatin1String("http://"))) {
+        c.serverListOn.remove(0, 7);
+    }
+    while (c.serverListOn.endsWith('/')) {
+        c.serverListOn.chop(1);
+    }
     return c;
 }
 
@@ -169,7 +182,8 @@ QByteArray defaultConfigJson() {
     "otg": { "base_url": "", "domain_id": "driveclub", "zone": "eu" },
     "shadnet": { "url": "http://127.0.0.1:31315",
                  "client_id": "2a347f19-d4c4-492d-aadc-bc07ae7b8c15", "allow_unverified": false },
-    "admin": { "address": "127.0.0.1", "port": 8081, "key": "@KEY@" }
+    "admin": { "address": "127.0.0.1", "port": 8081, "key": "@KEY@" },
+    "server": { "name": "", "list_on": "" }
 }
 )");
     return json.replace("@KEY@", key.toHex());
