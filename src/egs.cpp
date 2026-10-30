@@ -196,6 +196,12 @@ void minimalProfiles(Context&, const GetMinimalProfilesRequest& req,
                      GetMinimalProfilesResponse& resp) {
     QStringList names;
     for (const qint64 id : req.accounts()) {
+        // The game asks for negative ids too (placeholders of ghosts and remote players before their
+        // account is known): no profile, so it keeps its own name instead of showing "Driver -5".
+        if (id <= 0) {
+            names << QStringLiteral("%1=(none)").arg(id);
+            continue;
+        }
         MinimalProfile* p = resp.add_profiles();
         p->set_accountid(id);
         const QString name = egsPlayerName(id);
