@@ -327,6 +327,7 @@ QList<Score> scoresWithGhosts() {
     QList<Score> out;
     QMutexLocker l(&lock());
     QSqlQuery q(connection());
+    // "ghost:-1" is the game's "no ghost"; the caller parses the id.
     q.prepare(QStringLiteral("SELECT %1 FROM scores WHERE attachment LIKE '%ghost:%' "
                              "AND attachment NOT LIKE '%ghost:-%'")
                   .arg(QLatin1String(ScoreColumns)));
@@ -627,6 +628,22 @@ qint64 putGhost(const Ghost& g, const QByteArray& data) {
         return 0;
     }
     return q.lastInsertId().toLongLong();
+}
+
+std::optional<qint64> findGhost(qint64 accountId, const QString& mimeType, const QString& checksum,
+                                qint64 size) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT id FROM ghosts WHERE account_id = ? AND mime_type = ? AND "
+                             "checksum = ? AND size = ? ORDER BY id LIMIT 1"));
+    q.addBindValue(accountId);
+    q.addBindValue(text(mimeType));
+    q.addBindValue(text(checksum));
+    q.addBindValue(size);
+    if (run(q, "find ghost") && q.next()) {
+        return q.value(0).toLongLong();
+    }
+    return std::nullopt;
 }
 
 namespace {

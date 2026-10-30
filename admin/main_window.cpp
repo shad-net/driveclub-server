@@ -85,7 +85,6 @@ QTableWidget* makeTable(const QStringList& headers) {
     return t;
 }
 
-// The row's index into the JSON array is kept in column 0, so sorting keeps the mapping.
 QTableWidgetItem* cell(const QString& text, int index = -1) {
     auto* item = new QTableWidgetItem(text);
     if (index >= 0) {
@@ -227,6 +226,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     tabs_->addTab(buildChallengesTab(), tr("Challenges"));
     tabs_->addTab(buildCountersTab(), tr("Counters"));
     tabs_->addTab(buildGhostsTab(), tr("Ghosts"));
+    tabs_->addTab(buildStatsTab(), tr("Stats"));
     tabs_->addTab(buildTrafficTab(), tr("Traffic"));
     setCentralWidget(tabs_);
 
@@ -416,6 +416,37 @@ QWidget* MainWindow::buildGhostsTab() {
     return page;
 }
 
+QWidget* MainWindow::buildStatsTab() {
+    auto* page = new QWidget;
+    auto* layout = new QVBoxLayout(page);
+    auto* intro = new QLabel(tr(
+        "<b>Player stats</b> as the game's profile pages show them (statsService.getAccountStats). "
+        "The game keeps them in the counter store <code>stats/V06/player/&lt;id&gt;</code> and "
+        "writes it only with <code>OTG_Service_statsWrite</code> in the TSS. Values are the "
+        "game's own units."));
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+    statsPlayerTable_ =
+        makeTable({tr("Player"), tr("Account ID"), tr("Counters"), tr("Writes"), tr("Updated")});
+    layout->addWidget(statsPlayerTable_, 2);
+    auto* bar = new QHBoxLayout;
+    bar->addWidget(new QLabel(tr("Set")));
+    statsSet_ = new QComboBox;
+    statsSet_->addItems({QStringLiteral("Tracks"), QStringLiteral("Vehicles"),
+                         QStringLiteral("GameModes"), QStringLiteral("Challenges"),
+                         QStringLiteral("Overdrive"), QStringLiteral("FaceOff")});
+    bar->addWidget(statsSet_);
+    statsTitle_ = new QLabel(tr("Select a player"));
+    bar->addWidget(statsTitle_, 1);
+    layout->addLayout(bar);
+    statsView_ = makeTable({});
+    layout->addWidget(statsView_, 3);
+    connect(statsPlayerTable_, &QTableWidget::itemSelectionChanged, this,
+            &MainWindow::loadStatsTable);
+    connect(statsSet_, &QComboBox::currentTextChanged, this, &MainWindow::loadStatsTable);
+    return page;
+}
+
 QWidget* MainWindow::buildLeaderboardsTab() {
     auto* page = new QWidget;
     auto* layout = new QVBoxLayout(page);
@@ -578,6 +609,11 @@ void MainWindow::refresh() {
     api_.get(QStringLiteral("/api/ghosts"), [this](const ApiClient::Reply& r) {
         if (r.ok()) {
             showGhosts(r.json().array());
+        }
+    });
+    api_.get(QStringLiteral("/api/stats"), [this](const ApiClient::Reply& r) {
+        if (r.ok()) {
+            showStatsPlayers(r.json().object());
         }
     });
 }
@@ -1008,6 +1044,104 @@ void MainWindow::deleteUnusedGhosts() {
                           .arg(byteSize(double(bytes))));
 }
 
+void MainWindow::showStatsPlayers(const QJsonObject& stats) {
+    const int old = selectedIndex(statsPlayerTable_);
+    const QString selected =
+        old < 0 ? QString() : statsPlayers_.at(old).toObject().value("account_id").toString();
+    const QJsonArray players = stats.value("players").toArray();
+    const bool changed = players != statsPlayers_;
+    statsPlayers_ = players;
+    statsPlayerTable_->blockSignals(true);
+    statsPlayerTable_->setSortingEnabled(false);
+    statsPlayerTable_->clearSelection();
+    statsPlayerTable_->setRowCount(int(players.size()));
+    int reselect = -1;
+    for (int i = 0; i < players.size(); ++i) {
+        const QJsonObject p = players.at(i).toObject();
+        statsPlayerTable_->setItem(i, 0, cell(p.value("name").toString(), i));
+        statsPlayerTable_->setItem(i, 1, cell(p.value("account_id").toString()));
+        statsPlayerTable_->setItem(i, 2, numberCell(p.value("counters").toDouble()));
+        statsPlayerTable_->setItem(i, 3, numberCell(p.value("version").toDouble()));
+        statsPlayerTable_->setItem(i, 4, cell(ago(p.value("updated").toDouble())));
+        if (p.value("account_id").toString() == selected) {
+            reselect = i;
+        }
+    }
+    statsPlayerTable_->setSortingEnabled(true);
+    if (reselect >= 0) {
+        for (int row = 0; row < statsPlayerTable_->rowCount(); ++row) {
+            if (statsPlayerTable_->item(row, 0)->data(Qt::UserRole).toInt() == reselect) {
+                statsPlayerTable_->selectRow(row);
+                break;
+            }
+        }
+    }
+    statsPlayerTable_->blockSignals(false);
+    statsPlayerTable_->resizeColumnsToContents();
+    if (changed || reselect < 0) {
+        loadStatsTable();
+    }
+}
+
+void MainWindow::loadStatsTable() {
+    const int i = selectedIndex(statsPlayerTable_);
+    if (i < 0) {
+        statsTitle_->setText(statsPlayers_.isEmpty() ? tr("No player has stats stored yet")
+                                                     : tr("Select a player"));
+        statsView_->setRowCount(0);
+        statsView_->setColumnCount(0);
+        return;
+    }
+    const QJsonObject p = statsPlayers_.at(i).toObject();
+    const QString set = statsSet_->currentText();
+    api_.get(
+        QStringLiteral("/api/stats/table?account=%1&set=%2")
+            .arg(p.value("account_id").toString(), set),
+        [this, name = p.value("name").toString(), set](const ApiClient::Reply& r) {
+            if (!r.ok()) {
+                reportError(tr("Load stats"), r);
+                return;
+            }
+            const QJsonObject t = r.json().object();
+            const QJsonArray columns = t.value("columns").toArray();
+            const QJsonArray rows = t.value("rows").toArray();
+            statsView_->setSortingEnabled(false);
+            statsView_->clear();
+            if (set == QLatin1String("Overdrive") || set == QLatin1String("FaceOff")) {
+                // One row of many columns: shown turned on its side, a stat per line.
+                const QJsonArray values = rows.isEmpty()
+                                              ? QJsonArray()
+                                              : rows.first().toObject().value("values").toArray();
+                statsView_->setColumnCount(2);
+                statsView_->setHorizontalHeaderLabels({tr("Stat"), tr("Value")});
+                statsView_->setRowCount(int(columns.size()));
+                for (int c = 0; c < columns.size(); ++c) {
+                    statsView_->setItem(c, 0, cell(columns.at(c).toString()));
+                    statsView_->setItem(c, 1, numberCell(values.at(c).toDouble()));
+                }
+            } else {
+                QStringList headers{tr("Subject")};
+                for (const QJsonValue& c : columns) {
+                    headers << c.toString();
+                }
+                statsView_->setColumnCount(int(headers.size()));
+                statsView_->setHorizontalHeaderLabels(headers);
+                statsView_->setRowCount(int(rows.size()));
+                for (int row = 0; row < rows.size(); ++row) {
+                    const QJsonObject o = rows.at(row).toObject();
+                    statsView_->setItem(row, 0, cell(o.value("name").toString()));
+                    const QJsonArray values = o.value("values").toArray();
+                    for (int c = 0; c < values.size(); ++c) {
+                        statsView_->setItem(row, c + 1, numberCell(values.at(c).toDouble()));
+                    }
+                }
+            }
+            statsView_->setSortingEnabled(true);
+            statsView_->resizeColumnsToContents();
+            statsTitle_->setText(tr("%1: %2, %n row(s)", nullptr, int(rows.size())).arg(name, set));
+        });
+}
+
 void MainWindow::showBoards(const QJsonArray& boards) {
     const QString selected = selectedBoard();
     boards_ = boards;
@@ -1110,7 +1244,6 @@ void MainWindow::showEntries(const QJsonArray& entries) {
         rank->setData(Qt::UserRole, i);
         entryTable_->setItem(i, 0, rank);
         entryTable_->setItem(i, 1, cell(e.value("entrant").toString()));
-        // Scores are 64-bit; keep the exact text but sort numerically.
         const quint64 score = e.value("score").toString().toULongLong();
         entryTable_->setItem(i, 2, scoreCell(score));
         entryTable_->setItem(i, 3, cell(scoreValue(score)));
@@ -1141,7 +1274,6 @@ void MainWindow::appendTraffic(const QJsonArray& requests) {
         trafficTable_->setItem(row, 2, cell(r.value("method").toString()));
         const QString label = r.value("label").toString();
         trafficTable_->setItem(row, 3, cell(label.isEmpty() ? tr("(unknown)") : label));
-        // An expected status (e.g. 404 = gamestate not stored yet) is not an error.
         const bool error = status >= 400 && !r.value("expected").toBool();
         auto* statusItem = cell(QString::number(status));
         statusItem->setData(Qt::UserRole + 1, error);
@@ -1353,7 +1485,6 @@ void MainWindow::addEntries() {
         if (isTime) {
             body.insert(QStringLiteral("time_ms"), best + i * step);
         } else if (kind->currentIndex() == 2) {
-            // Kind 1, as the game posts drift scores: (1 << 60) | points.
             const quint64 points = quint64(std::max<qint64>(0, best - i * step));
             body.insert(QStringLiteral("score"), QString::number((quint64(1) << 60) | points));
         } else {

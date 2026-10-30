@@ -5,7 +5,7 @@ syntax = "proto2";
 
 message Empty {}
 
-// indexService 
+// indexService
 
 message SvcEndpointDescriptor {
   optional string service = 1;
@@ -24,7 +24,7 @@ message SvcEndpointDescriptorList {
   repeated SvcEndpointDescriptor endpoints = 1;
 }
 
-// systemService
+// systemService 
 
 message GetVersionResponse {
   optional string version = 1;
@@ -59,7 +59,7 @@ message StatusResult {
   optional int32 retryHint = 1;
 }
 
-// profileService
+// profileService 
 
 message GetMinimalProfilesRequest {
   repeated int64 accounts = 1;
@@ -123,7 +123,7 @@ message GetAggregatedProfilesResponse {
   repeated AggregatedProfile profiles = 1;
 }
 
-// friendsListService
+// friendsListService 
 
 enum FriendType {
   FRIEND_TYPE_0 = 0;
@@ -149,7 +149,7 @@ message GetFriendsResponse {
   repeated Friend friends = 1;
 }
 
-// systemService.getTimeInfo
+// systemService.getTimeInfo 
 
 message GetTimeInfoResponse {
   optional int64 timestamp = 1;  // server time, ms since 1970
@@ -213,7 +213,7 @@ message UpdateFameResponse {
   optional FameClubChange clubProgression = 2;
 }
 
-// storageService: ghosts
+// storageService: ghosts ("bobs") 
 
 enum BobObjectType {
   BOB_OBJECT_TYPE_0 = 0;
@@ -253,4 +253,33 @@ message GetRemoteUrlResponse {
   optional int64 id = 1;
   optional string publicUrl = 2;
   optional string checksum = 3;
+}
+
+// statsService.getAccountStats
+
+message GetAccountStatsRequest {
+  optional string columnDefinitionSetName = 1;
+  optional bool currentAccount = 2;
+  repeated IdRef accounts = 3;
+  optional bool currentClub = 4;
+  repeated IdRef clubs = 5;
+}
+
+message StatDefinition {
+  optional string name = 1;
+}
+
+message StatEntry {
+  repeated int64 columns = 1;
+}
+
+message AccountStat {
+  optional int32 total = 1;
+  optional StatDefinition definition = 2;
+  repeated StatEntry entries = 3;
+}
+
+message GetAccountStatsResponse {
+  repeated string columnNames = 1;
+  repeated AccountStat stats = 2;
 }

@@ -8,7 +8,7 @@
 
 namespace {
 
-constexpr const char* m_version = "0.0.3";
+constexpr const char* m_version = "0.0.4";
 
 QString IsoBuildDate() {
     static const QStringList months = {
@@ -19,7 +19,7 @@ QString IsoBuildDate() {
     const QString raw = QString::fromLatin1(__DATE__);
     const QStringList parts = raw.split(QLatin1Char(' '), Qt::SkipEmptyParts);
     if (parts.size() != 3) {
-        return raw; // unexpected compiler format; hand it back untouched
+        return raw;
     }
 
     const int month = months.indexOf(parts.at(0)) + 1;

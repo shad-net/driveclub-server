@@ -57,6 +57,7 @@ void AdminService::handle(const HttpRequest& request, HttpServer::Responder resp
         !sameKey(request.headers.value("x-admin-key"), config_.adminKey)) {
         qCWarning(lcAdmin).noquote()
             << request.method << request.path << "from" << request.peer.toString() << "-> 401";
+        // A game pointed at the wrong port: say so, once per address.
         static QSet<QString> warned;
         const bool gamePath = request.path.startsWith(QLatin1String("/egs/")) ||
                               request.path.startsWith(QLatin1String("/titles/")) ||
@@ -220,6 +221,50 @@ HttpResponse AdminService::route(const HttpRequest& request) {
             return json(200, QJsonObject{{QStringLiteral("removed"), resource}});
         }
     }
+    if (what == QLatin1String("stats") && parts.size() == 2 && m == "GET") {
+        static const QRegularExpression statsResource(
+            QStringLiteral("^stats/V\\d+/player/(\\d+)$"));
+        QJsonArray out;
+        for (const db::GameState& g : db::gameStates()) {
+            const auto match = statsResource.match(g.resource);
+            if (!match.hasMatch()) {
+                continue;
+            }
+            const qint64 account = match.captured(1).toLongLong();
+            out.append(QJsonObject{{QStringLiteral("account_id"), QString::number(account)},
+                                   {QStringLiteral("name"), egsPlayerName(account)},
+                                   {QStringLiteral("counters"), g.counts.size()},
+                                   {QStringLiteral("version"), g.version},
+                                   {QStringLiteral("updated"), double(g.updated)}});
+        }
+        QJsonArray sets;
+        for (const QString& s : egsStatSets()) {
+            sets.append(s);
+        }
+        return json(200,
+                    QJsonObject{{QStringLiteral("players"), out}, {QStringLiteral("sets"), sets}});
+    }
+    if (what == QLatin1String("stats") && parts.size() == 3 && parts[2] == QLatin1String("table") &&
+        m == "GET") {
+        const qint64 account = request.query.queryItemValue(QStringLiteral("account")).toLongLong();
+        const QString set = request.query.queryItemValue(QStringLiteral("set"));
+        const EgsStatsTable t = egsStats(account, set);
+        if (!t.known) {
+            return error(404, QStringLiteral("unknown stats set"));
+        }
+        QJsonArray rows;
+        for (const auto& [name, values] : t.rows) {
+            QJsonArray v;
+            for (const qint64 x : values) {
+                v.append(x);
+            }
+            rows.append(QJsonObject{{QStringLiteral("name"), name}, {QStringLiteral("values"), v}});
+        }
+        return json(200,
+                    QJsonObject{{QStringLiteral("columns"), QJsonArray::fromStringList(t.columns)},
+                                {QStringLiteral("rows"), rows},
+                                {QStringLiteral("stored"), t.stored}});
+    }
     if (what == QLatin1String("players") && parts.size() == 2 && m == "GET") {
         QJsonArray out;
         for (const db::Player& p : db::players()) {
@@ -262,7 +307,6 @@ HttpResponse AdminService::route(const HttpRequest& request) {
     return error(404, QStringLiteral("not found"));
 }
 
-// POST /api/leaderboards/entries?board=<name>
 HttpResponse AdminService::setEntry(const QString& board, const QByteArray& body) {
     QJsonParseError parseError{};
     const QJsonDocument doc = QJsonDocument::fromJson(body, &parseError);
