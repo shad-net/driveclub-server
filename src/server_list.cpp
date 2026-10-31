@@ -3,6 +3,7 @@
 
 #include "server_list.h"
 
+#include "upnp.h"
 #include "version.h"
 
 #include <QDateTime>
@@ -109,7 +110,8 @@ QByteArray serverInfoJson() {
     return QJsonDocument(QJsonObject{{QStringLiteral("name"), serverName()},
                                      {QStringLiteral("version"), Driveclub::Version()},
                                      {QStringLiteral("players"), players},
-                                     {QStringLiteral("port"), int(state().config.port)}})
+                                     {QStringLiteral("port"), int(state().config.port)},
+                                     {QStringLiteral("internet"), upnpPublicAddress()}})
         .toJson(QJsonDocument::Compact);
 }
 

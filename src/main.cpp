@@ -13,6 +13,7 @@
 #include "otg.h"
 #include "request_log.h"
 #include "server_list.h"
+#include "upnp.h"
 #include "trace.h"
 #include "version.h"
 
@@ -152,6 +153,13 @@ int main(int argc, char* argv[]) {
     }
     egsStartEvents();
     serverListStart({config->serverName, config->serverListOn, config->port}, onlinePlayerNames);
+    // internet.txt tells the launcher whether and where the server is reachable from the internet
+    const QString internetStatus = configDir.absoluteFilePath(QStringLiteral("internet.txt"));
+    if (config->internetUpnp) {
+        upnpStart(config->port, internetStatus);
+    } else {
+        QFile::remove(internetStatus);
+    }
     otgRestoreTokens();
     otgFameFromStats();
     startKeepaliveSummaries();

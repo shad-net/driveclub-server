@@ -32,6 +32,7 @@ struct Config {
     QString adminKey;
     QString serverName;   // server.name: in the launcher's server list, empty = the computer's name
     QString serverListOn; // server.list_on: "host[:port]" of a server to be listed on, empty = none
+    bool internetUpnp = false; // internet.upnp: the router forwards the port to this PC (upnp.h)
 };
 
 std::optional<Config> loadConfig(const QByteArray& json, QString* error);

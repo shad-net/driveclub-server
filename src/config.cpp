@@ -167,6 +167,7 @@ std::optional<Config> loadConfig(const QByteArray& json, QString* error) {
     while (c.serverListOn.endsWith('/')) {
         c.serverListOn.chop(1);
     }
+    c.internetUpnp = root.value("internet").toObject().value("upnp").toBool(false);
     return c;
 }
 
@@ -183,7 +184,8 @@ QByteArray defaultConfigJson() {
     "shadnet": { "url": "http://127.0.0.1:31315",
                  "client_id": "2a347f19-d4c4-492d-aadc-bc07ae7b8c15", "allow_unverified": false },
     "admin": { "address": "127.0.0.1", "port": 8081, "key": "@KEY@" },
-    "server": { "name": "", "list_on": "" }
+    "server": { "name": "", "list_on": "" },
+    "internet": { "upnp": false }
 }
 )");
     return json.replace("@KEY@", key.toHex());

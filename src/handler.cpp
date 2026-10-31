@@ -8,6 +8,7 @@
 #include "eventlists.h"
 #include "otg.h"
 #include "server_list.h"
+#include "upnp.h"
 
 #include <QDateTime>
 #include <QHash>
@@ -366,6 +367,10 @@ static bool handlePsn(const HttpRequest& request, const QString& endpoint,
                 const quint32 own = request.local.toIPv4Address(&ok);
                 if (ok) {
                     p.first = QHostAddress(own).toString();
+                }
+                // A player on the internet reaches it at the router's public address (upnp.h).
+                if (isInternetAddress(asker) && !upnpPublicAddress().isEmpty()) {
+                    p.first = upnpPublicAddress();
                 }
             }
             r.body = QStringLiteral("%1 %2").arg(p.first).arg(p.second).toUtf8();
