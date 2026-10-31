@@ -33,6 +33,7 @@ message GetVersionResponse {
 
 // ---- sessionService ----------------------------------------------------------------------
 
+// sessionService.oauthLogin / oauthRefresh, built at 0xA34440..0xA34997.
 message OAuthLoginRequest {
   optional string authCode = 1;             // NpAuth authorization code
   optional string clientVersion = 2;        // e.g. "CV_bM_tP_p128_x3"
@@ -256,7 +257,6 @@ message GetRemoteUrlResponse {
 }
 
 // ---- statsService.getAccountStats ---------------------------------------------------------------
-
 message GetAccountStatsRequest {
   optional string columnDefinitionSetName = 1;
   optional bool currentAccount = 2;
@@ -436,7 +436,46 @@ message GetKeywordsRequest {
   repeated string groupNames = 1;
 }
 
-// Answers (placeholders until the game's parsers are checked).
+message ClubMember {
+  optional bool online = 1;
+  optional int64 account = 2;
+  optional ClubValue type = 3;
+  optional string createdOn = 4;
+  optional bool mvp = 5;
+}
+
+message ClubProgression {
+  optional int64 xp = 1;
+}
+
+message Club {
+  optional int64 id = 1;
+  optional string name = 2;
+  optional string historicalName = 3;
+  optional ClubValue membership = 4;
+  optional ClubValue clubStatus = 5;
+  optional int32 size = 6;
+  optional string createdOn = 7;
+  repeated ClubMember clubMembers = 8;
+  optional ClubCustomization customization = 9;
+  optional ClubProgression progression = 10;
+}
+
+message QueryClubsResponse {
+  repeated Club clubs = 1;
+}
+
+message ClubInvite {
+  optional ClubValue status = 1;
+  optional int64 id = 2;
+  optional int64 club = 3;
+  optional int64 account = 4;
+  optional int64 invitedBy = 5;
+  optional string createdOn = 6;
+  optional string updatedOn = 7;
+  optional string expiresOn = 8;
+}
+
 message ClubReply {
   optional int64 id = 1;
   optional ClubValue membership = 2;
@@ -447,7 +486,7 @@ message ClubListResponse {
 }
 
 message ClubInvitesResponse {
-  repeated IdRef clubInvites = 1;
+  repeated ClubInvite clubInvites = 1;
 }
 
 message UpdateCustomizationResponse {
@@ -463,7 +502,6 @@ message GetKeywordsResponse {
 }
 
 // ---- friendsListService / accountService (discovery mode) ---------------------------------------
-
 message FriendName {
   optional string name = 1;
 }

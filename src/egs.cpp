@@ -664,7 +664,7 @@ const QList<Endpoint>& endpoints() {
             Endpoint::Discovery::Clubs, "clubService", "createAndJoin"),
         discoveryEndpoint<ClubNameMessage, ClubNameMessage>(
             Endpoint::Discovery::Clubs, "clubService", "sanitize"),
-        discoveryEndpoint<QueryClubsRequest, ClubListResponse>(
+        discoveryEndpoint<QueryClubsRequest, QueryClubsResponse>(
             Endpoint::Discovery::Clubs, "clubService", "queryClubs"),
         discoveryEndpoint<ClubQuickSearchRequest, ClubListResponse>(
             Endpoint::Discovery::Clubs, "clubService", "quickSearch"),
