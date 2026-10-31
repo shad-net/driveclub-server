@@ -108,6 +108,7 @@ std::optional<Config> loadConfig(const QByteArray& json, QString* error) {
     if (egs.contains("version")) {
         c.egs.version = egs.value("version").toString();
     }
+    c.egs.clubDiscovery = egs.value("club_discovery").toBool(false);
 
     const QJsonObject otg = root.value("otg").toObject();
     c.otg.baseUrl = otg.value("base_url").toString();

@@ -5,7 +5,7 @@ syntax = "proto2";
 
 message Empty {}
 
-// indexService
+// ---- indexService ------------------------------------------------------------------------
 
 message SvcEndpointDescriptor {
   optional string service = 1;
@@ -24,14 +24,14 @@ message SvcEndpointDescriptorList {
   repeated SvcEndpointDescriptor endpoints = 1;
 }
 
-// systemService 
+// ---- systemService -----------------------------------------------------------------------
 
 message GetVersionResponse {
   optional string version = 1;
   optional string serverIdentifier = 2;
 }
 
-// sessionService
+// ---- sessionService ----------------------------------------------------------------------
 
 message OAuthLoginRequest {
   optional string authCode = 1;             // NpAuth authorization code
@@ -59,7 +59,7 @@ message StatusResult {
   optional int32 retryHint = 1;
 }
 
-// profileService 
+// ---- profileService ----------------------------------------------------------------------
 
 message GetMinimalProfilesRequest {
   repeated int64 accounts = 1;
@@ -123,7 +123,7 @@ message GetAggregatedProfilesResponse {
   repeated AggregatedProfile profiles = 1;
 }
 
-// friendsListService 
+// ---- friendsListService ------------------------------------------------------------------
 
 enum FriendType {
   FRIEND_TYPE_0 = 0;
@@ -149,13 +149,13 @@ message GetFriendsResponse {
   repeated Friend friends = 1;
 }
 
-// systemService.getTimeInfo 
+// ---- systemService.getTimeInfo -----------------------------------------------------------
 
 message GetTimeInfoResponse {
   optional int64 timestamp = 1;  // server time, ms since 1970
 }
 
-// transactionService
+// ---- transactionService ------------------------------------------------------------------
 
 message TransactionRequest {
   optional string currentTransactionId = 1;
@@ -165,7 +165,7 @@ message TransactionResponse {
   optional string currentTransactionId = 1;
 }
 
-// profileService: fame 
+// ---- profileService: fame ----------------------------------------------------------------
 
 message FameAccountProgression {
   optional int64 xp = 1;
@@ -213,7 +213,7 @@ message UpdateFameResponse {
   optional FameClubChange clubProgression = 2;
 }
 
-// storageService: ghosts ("bobs") 
+// ---- storageService: ghosts ("bobs") -----------------------------------------------------
 
 enum BobObjectType {
   BOB_OBJECT_TYPE_0 = 0;
@@ -255,7 +255,7 @@ message GetRemoteUrlResponse {
   optional string checksum = 3;
 }
 
-// statsService.getAccountStats
+// ---- statsService.getAccountStats ---------------------------------------------------------------
 
 message GetAccountStatsRequest {
   optional string columnDefinitionSetName = 1;
@@ -282,4 +282,182 @@ message AccountStat {
 message GetAccountStatsResponse {
   repeated string columnNames = 1;
   repeated AccountStat stats = 2;
+}
+
+// ---- clubService (discovery mode) ----------------------------------------------------------------
+enum ClubValue {
+  CLUB_VALUE_0 = 0;
+  CLUB_VALUE_1 = 1;
+  CLUB_VALUE_2 = 2;
+  CLUB_VALUE_3 = 3;
+  CLUB_VALUE_4 = 4;
+  CLUB_VALUE_5 = 5;
+  CLUB_VALUE_6 = 6;
+  CLUB_VALUE_7 = 7;
+  CLUB_VALUE_8 = 8;
+  CLUB_VALUE_9 = 9;
+  CLUB_VALUE_10 = 10;
+  CLUB_VALUE_11 = 11;
+  CLUB_VALUE_12 = 12;
+  CLUB_VALUE_13 = 13;
+  CLUB_VALUE_14 = 14;
+  CLUB_VALUE_15 = 15;
+  CLUB_VALUE_16 = 16;
+  CLUB_VALUE_17 = 17;
+  CLUB_VALUE_18 = 18;
+  CLUB_VALUE_19 = 19;
+  CLUB_VALUE_20 = 20;
+  CLUB_VALUE_21 = 21;
+  CLUB_VALUE_22 = 22;
+  CLUB_VALUE_23 = 23;
+  CLUB_VALUE_24 = 24;
+  CLUB_VALUE_25 = 25;
+  CLUB_VALUE_26 = 26;
+  CLUB_VALUE_27 = 27;
+  CLUB_VALUE_28 = 28;
+  CLUB_VALUE_29 = 29;
+  CLUB_VALUE_30 = 30;
+  CLUB_VALUE_31 = 31;
+  CLUB_VALUE_32 = 32;
+  CLUB_VALUE_33 = 33;
+  CLUB_VALUE_34 = 34;
+  CLUB_VALUE_35 = 35;
+  CLUB_VALUE_36 = 36;
+  CLUB_VALUE_37 = 37;
+  CLUB_VALUE_38 = 38;
+  CLUB_VALUE_39 = 39;
+  CLUB_VALUE_40 = 40;
+  CLUB_VALUE_41 = 41;
+  CLUB_VALUE_42 = 42;
+  CLUB_VALUE_43 = 43;
+  CLUB_VALUE_44 = 44;
+  CLUB_VALUE_45 = 45;
+  CLUB_VALUE_46 = 46;
+  CLUB_VALUE_47 = 47;
+  CLUB_VALUE_48 = 48;
+  CLUB_VALUE_49 = 49;
+  CLUB_VALUE_50 = 50;
+  CLUB_VALUE_51 = 51;
+  CLUB_VALUE_52 = 52;
+  CLUB_VALUE_53 = 53;
+  CLUB_VALUE_54 = 54;
+  CLUB_VALUE_55 = 55;
+  CLUB_VALUE_56 = 56;
+  CLUB_VALUE_57 = 57;
+  CLUB_VALUE_58 = 58;
+  CLUB_VALUE_59 = 59;
+  CLUB_VALUE_60 = 60;
+  CLUB_VALUE_61 = 61;
+  CLUB_VALUE_62 = 62;
+  CLUB_VALUE_63 = 63;
+}
+
+message ClubCreateRequest {
+  optional string name = 1;
+  optional ClubValue membership = 2;
+}
+
+message ClubNameMessage {
+  optional string name = 1;
+}
+
+message ClubIdRequest {
+  optional int64 id = 1;
+}
+
+message ClubMembershipRequest {
+  optional int64 id = 1;
+  optional ClubValue membership = 2;
+}
+
+message ClubAccountsRequest {
+  optional IdRef club = 1;
+  repeated IdRef accounts = 2;
+}
+
+message ClubRange {
+  optional int32 numberOfResults = 1;
+}
+
+message QueryClubsRequest {
+  repeated int64 accountIds = 1;
+  repeated int64 clubIds = 2;
+  optional ClubRange range = 3;
+  optional ClubValue orderBy = 4;
+  repeated string clubNames = 5;
+  optional bool withProgression = 6;
+  optional bool withCustomization = 7;
+  optional bool withMembers = 8;
+  optional bool lookupRemoteUrl = 9;
+}
+
+message ClubQuickSearchRequest {
+  optional string startsWith = 1;
+  optional ClubValue orderBy = 2;
+  optional int32 maximumEntries = 3;
+}
+
+message FindClubInvitesRequest {
+  optional bool clubInviteIdsNullListField = 1;
+  repeated int64 clubIds = 2;
+  optional bool clubIdsNullListField = 3;
+  repeated int64 accountIds = 4;
+  optional bool accountIdsNullListField = 5;
+  optional bool invitedByNullListField = 6;
+  repeated ClubValue status = 7;
+  optional bool statusNullListField = 8;
+  optional bool includeExpired = 9;
+  optional int32 maximumEntries = 10;
+}
+
+message ClubLayer {
+  repeated string colors = 1;
+  optional float scale = 2;
+  optional string image = 3;
+}
+
+message ClubCustomization {
+  optional int64 id = 1;
+  optional string liveryDescriptor = 2;
+  optional int64 badgeBobId = 3;
+  optional int64 smallBadgeBobId = 4;
+  repeated ClubLayer layers = 5;
+  repeated string tags = 6;
+  optional string badgeBobUrl = 7;
+  optional string smallBadgeBobUrl = 8;
+}
+
+message UpdateCustomizationRequest {
+  optional bool lookupRemoteUrl = 1;
+  optional ClubCustomization customization = 2;
+}
+
+message GetKeywordsRequest {
+  repeated string groupNames = 1;
+}
+
+// Answers (placeholders until the game's parsers are checked).
+message ClubReply {
+  optional int64 id = 1;
+  optional ClubValue membership = 2;
+}
+
+message ClubListResponse {
+  repeated IdRef clubs = 1;
+}
+
+message ClubInvitesResponse {
+  repeated IdRef clubInvites = 1;
+}
+
+message UpdateCustomizationResponse {
+  repeated ClubCustomization customizations = 1;
+}
+
+message Keyword {
+  optional string name = 1;
+}
+
+message GetKeywordsResponse {
+  repeated Keyword keywords = 1;
 }

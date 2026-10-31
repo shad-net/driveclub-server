@@ -40,8 +40,7 @@ EgsConfig& config() {
     return c;
 }
 
-// Sessions
-
+// ---- Sessions ---------------------------------------------------------------------------------
 struct Session {
     QByteArray key;
     qint32 accountId = 0;
@@ -66,8 +65,7 @@ Sessions& sessions() {
     return s;
 }
 
-// Players (account id -> name)
-
+// ---- Players (account id -> name) -------------------------------------------------------------
 void rememberPlayer(qint64 accountId, const QString& name, bool loggedIn,
                     const QString& shadnetAccount = {}) {
     db::Player p;
@@ -78,6 +76,7 @@ void rememberPlayer(qint64 accountId, const QString& name, bool loggedIn,
     db::putPlayer(p);
 }
 
+// Stable positive id per online name, so a player keeps the same accountId across logins.
 qint32 accountIdFor(const QString& name) {
     const QByteArray h = QCryptographicHash::hash(name.toUtf8(), QCryptographicHash::Sha1);
     const quint32 v =
@@ -85,17 +84,20 @@ qint32 accountIdFor(const QString& name) {
     return static_cast<qint32>(v & 0x7fffffff) | 1;
 }
 
+// protobuf returns std::string in older releases and std::string_view in newer ones.
 QString qs(std::string_view s) {
     return QString::fromUtf8(s.data(), static_cast<qsizetype>(s.size()));
 }
 
-// Endpoints
+// ---- Endpoints --------------------------------------------------------------------------------
+
 struct Context {
     const HttpRequest& request;
     QByteArray sessionKey;    // the session this request was signed with, empty before login
     QByteArray newSessionKey; // set by a handler: sent as X-SessionKey, becomes the signing key
     int status = 200;
-    AuthResult auth; // login endpoints: the shadNet check of the authCode
+    AuthResult auth;         // login endpoints: the shadNet check of the authCode
+    QByteArray serviceError; // set by a handler: sent as X-Service-Error
 };
 
 struct Endpoint {
@@ -105,7 +107,9 @@ struct Endpoint {
     const gp::Descriptor* response;
     bool secure;
     bool listed; // sent in getSvcEndpointList
+    // Parses the body, runs the handler, returns the serialized answer.
     std::function<std::string(Context&, const QByteArray&)> run;
+    bool discovery = false; // club discovery mode only (config egs.club_discovery)
 };
 
 template <class Req, class Resp>
@@ -131,9 +135,31 @@ Endpoint endpoint(const char* service, const char* method, bool secure, bool lis
     return e;
 }
 
+// Club discovery mode: the method is listed so the game sends it
+template <class Req, class Resp>
+Endpoint discoveryEndpoint(const char* service, const char* method) {
+    Endpoint e =
+        endpoint<Req, Resp>(service, method, false, true, [](Context&, const Req&, Resp&) {});
+    e.discovery = true;
+    e.run = [service, method](Context& ctx, const QByteArray& body) {
+        Req req;
+        req.ParseFromArray(body.constData(), static_cast<int>(body.size()));
+        qCInfo(lcEgs).noquote() << "club discovery:" << service << method << "from"
+                                << egsSessionName(ctx.sessionKey) << "-"
+                                << qs(req.ShortDebugString()) << "(answered 503)";
+        ctx.status = 503;
+        ctx.serviceError = "Service unavailable";
+        StatusResult result;
+        result.set_retryhint(300);
+        return result.SerializeAsString();
+    };
+    return e;
+}
+
 std::string endpointList();
 
 void login(Context& ctx, const OAuthLoginRequest& req, OAuthLoginResponse& resp) {
+    // A verified login uses shadNet's online id, not the name the client sent.
     const bool verified = ctx.auth.outcome == AuthResult::Outcome::Verified;
     QString name = verified ? ctx.auth.onlineId : qs(req.name());
     if (name.isEmpty()) {
@@ -150,7 +176,6 @@ void login(Context& ctx, const OAuthLoginRequest& req, OAuthLoginResponse& resp)
     s.lastSeen = s.created;
     {
         QMutexLocker lock(&sessions().mutex);
-        // One session per player: drop the old key.
         for (auto it = sessions().byKey.begin(); it != sessions().byKey.end();) {
             if (it->name == name) {
                 db::removeSession(it->key);
@@ -245,7 +270,6 @@ void timeInfo(Context&, const Empty&, GetTimeInfoResponse& resp) {
     resp.set_timestamp(QDateTime::currentMSecsSinceEpoch());
 }
 
-// The session a request was signed with, or nullptr (call with sessions().mutex held).
 Session* sessionOf(const Context& ctx) {
     auto it = sessions().byKey.find(ctx.sessionKey);
     return it == sessions().byKey.end() ? nullptr : &*it;
@@ -390,7 +414,7 @@ void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& res
         }
     }
     if (id == 0) {
-        ctx.status = 500;
+        ctx.status = 500; // the game marks the upload failed (0x41B6E0) and races on
         qCWarning(lcEgs).noquote()
             << "ghost from" << name << "not stored (" << data.size() << "bytes)";
         return;
@@ -554,7 +578,6 @@ EgsStatsTable statsTable(qint64 accountId, const QString& set) {
 
 void accountStats(Context& ctx, const GetAccountStatsRequest& req, GetAccountStatsResponse& resp) {
     const QString set = qs(req.columndefinitionsetname());
-    // Whose stats: an asked account, else the caller. Clubs are not implemented: no rows.
     const bool club = req.currentclub() || req.clubs_size() > 0;
     const qint64 account = req.accounts_size() > 0 ? req.accounts(0).id() : sessionAccount(ctx);
     EgsStatsTable t = statsTable(club ? 0 : account, set);
@@ -638,12 +661,32 @@ const QList<Endpoint>& endpoints() {
                                                             true, getRemoteUrl),
         endpoint<GetAccountStatsRequest, GetAccountStatsResponse>("statsService", "getAccountStats",
                                                                   false, true, accountStats),
+        // Club discovery mode (off unless config.json egs.club_discovery is true).
+        discoveryEndpoint<ClubCreateRequest, ClubReply>("clubService", "createAndJoin"),
+        discoveryEndpoint<ClubNameMessage, ClubNameMessage>("clubService", "sanitize"),
+        discoveryEndpoint<QueryClubsRequest, ClubListResponse>("clubService", "queryClubs"),
+        discoveryEndpoint<ClubQuickSearchRequest, ClubListResponse>("clubService", "quickSearch"),
+        discoveryEndpoint<ClubAccountsRequest, ClubReply>("clubService", "join"),
+        discoveryEndpoint<ClubIdRequest, ClubReply>("clubService", "requestJoin"),
+        discoveryEndpoint<ClubIdRequest, ClubReply>("clubService", "leave"),
+        discoveryEndpoint<ClubAccountsRequest, Empty>("clubService", "invite"),
+        discoveryEndpoint<FindClubInvitesRequest, ClubInvitesResponse>("clubService",
+                                                                       "findInvites"),
+        discoveryEndpoint<ClubIdRequest, Empty>("clubService", "rejectInvite"),
+        discoveryEndpoint<ClubIdRequest, Empty>("clubService", "rejectJoinRequest"),
+        discoveryEndpoint<ClubMembershipRequest, ClubReply>("clubService", "updateMembership"),
+        discoveryEndpoint<UpdateCustomizationRequest, UpdateCustomizationResponse>(
+            "clubService", "updateCustomization"),
+        discoveryEndpoint<GetKeywordsRequest, GetKeywordsResponse>("keywordService", "getKeywords"),
     };
     return list;
 }
 
 const Endpoint* findEndpoint(const QString& service, const QString& method) {
     for (const Endpoint& e : endpoints()) {
+        if (e.discovery && !config().clubDiscovery) {
+            continue;
+        }
         if (e.service == service && e.method == method) {
             return &e;
         }
@@ -654,7 +697,7 @@ const Endpoint* findEndpoint(const QString& service, const QString& method) {
 std::string endpointList() {
     SvcEndpointDescriptorList list;
     for (const Endpoint& e : endpoints()) {
-        if (!e.listed) {
+        if (!e.listed || (e.discovery && !config().clubDiscovery)) {
             continue;
         }
         SvcEndpointDescriptor* d = list.add_endpoints();
@@ -773,6 +816,7 @@ void copyMessage24(const gp::DescriptorProto& in, gp::DescriptorProto* out) {
 
 QByteArray egsDescriptor() {
     static const QByteArray d = [] {
+        // Built from the compiled egs.proto, reduced to protobuf 2.4.1 descriptor fields.
         gp::FileDescriptorProto full;
         SvcEndpointDescriptorList::descriptor()->file()->CopyTo(&full);
         gp::FileDescriptorProto file;
@@ -805,6 +849,7 @@ QString egsDescribeBody(const QString& path, bool response, int status, const QB
     if (!msg->ParseFromArray(body.constData(), static_cast<int>(body.size()))) {
         return QStringLiteral("(does not parse as %1)").arg(qs(type->name()));
     }
+    // Large bytes fields (a ghost in createBob is up to ~150 KB) are shown by size only.
     const gp::Reflection* reflection = msg->GetReflection();
     for (int i = 0; i < type->field_count(); ++i) {
         const gp::FieldDescriptor* field = type->field(i);
@@ -845,6 +890,7 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
     const QString service = parts.value(0);
     const QString method = parts.value(1);
 
+    // Which session signed this? Unknown signatures are answered anyway (logged by the trace).
     const auto found =
         egsFindSessionKey(method, request.body, request.headers.value("x-request-signature"));
     const QByteArray sessionKey = found.value_or(QByteArray());
@@ -861,7 +907,6 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
         return true;
     }
 
-    // Runs the handler and sends its answer. `request` is copied: logins finish asynchronously.
     auto run = [e, service, method, sessionKey, respond](const HttpRequest& req,
                                                          const AuthResult& auth) {
         Context ctx{req, sessionKey, {}, 200, auth};
@@ -871,6 +916,9 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
         HttpResponse r = egsAnswer(method, signKey, ctx.status, body);
         if (!ctx.newSessionKey.isEmpty()) {
             r.headers.append(qMakePair(QByteArray("X-SessionKey"), ctx.newSessionKey));
+        }
+        if (!ctx.serviceError.isEmpty()) {
+            r.headers.append(qMakePair(QByteArray("X-Service-Error"), ctx.serviceError));
         }
         QString who;
         if (!ctx.sessionKey.isEmpty()) {
@@ -897,8 +945,6 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
                 run(request, auth);
                 return;
             }
-            // Answers >= 500 are decoded as StatusResult; the login error path reads
-            // retryHint. The X-Service-Error texts are the game's own error strings.
             StatusResult result;
             result.set_retryhint(auth.unavailable ? 30 : 300);
             const std::string out = result.SerializeAsString();
