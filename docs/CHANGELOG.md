@@ -9,6 +9,7 @@
     - `nearby` centres on the caller.
     - rows that already stored under the literal name are removed when the server starts, because there’s no way to tell whose they were. 
 - Club discovery added for debugging
+- Friends discovery added for debugging
 
 ### 0.0.4, 2026-10-30
 

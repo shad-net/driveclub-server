@@ -461,3 +461,27 @@ message Keyword {
 message GetKeywordsResponse {
   repeated Keyword keywords = 1;
 }
+
+// ---- friendsListService / accountService (discovery mode) ---------------------------------------
+
+message FriendName {
+  optional string name = 1;
+}
+
+message FriendNames {
+  repeated FriendName accounts = 1;
+}
+
+message FriendsChangeRequest {
+  optional FriendNames data = 1;
+}
+
+message AccountQuickSearchRequest {
+  optional string startsWith = 1;
+  optional ClubValue orderBy = 2;
+  optional int32 maximumEntries = 3;
+}
+
+message AccountListResponse {
+  repeated IdRef accounts = 1;
+}

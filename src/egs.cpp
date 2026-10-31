@@ -5,8 +5,8 @@
 
 #include "auth.h"
 #include "database.h"
-#include "egs.pb.h"
 #include "otg.h"
+#include "egs.pb.h"
 
 #include <google/protobuf/descriptor.pb.h>
 #include <google/protobuf/dynamic_message.h>
@@ -41,6 +41,7 @@ EgsConfig& config() {
 }
 
 // ---- Sessions ---------------------------------------------------------------------------------
+
 struct Session {
     QByteArray key;
     qint32 accountId = 0;
@@ -51,6 +52,8 @@ struct Session {
     qint64 created = 0;
     qint64 lastSeen = 0;
     int requests = 0;
+    // transactionService: the current transaction id (empty = none yet) and the counter new
+    // ids come from. In memory only: after a server restart the game simply asks for a new one.
     QString transaction;
     qint64 transactionCounter = 1000;
 };
@@ -66,6 +69,7 @@ Sessions& sessions() {
 }
 
 // ---- Players (account id -> name) -------------------------------------------------------------
+
 void rememberPlayer(qint64 accountId, const QString& name, bool loggedIn,
                     const QString& shadnetAccount = {}) {
     db::Player p;
@@ -76,7 +80,6 @@ void rememberPlayer(qint64 accountId, const QString& name, bool loggedIn,
     db::putPlayer(p);
 }
 
-// Stable positive id per online name, so a player keeps the same accountId across logins.
 qint32 accountIdFor(const QString& name) {
     const QByteArray h = QCryptographicHash::hash(name.toUtf8(), QCryptographicHash::Sha1);
     const quint32 v =
@@ -96,7 +99,7 @@ struct Context {
     QByteArray sessionKey;    // the session this request was signed with, empty before login
     QByteArray newSessionKey; // set by a handler: sent as X-SessionKey, becomes the signing key
     int status = 200;
-    AuthResult auth;         // login endpoints: the shadNet check of the authCode
+    AuthResult auth; // login endpoints: the shadNet check of the authCode
     QByteArray serviceError; // set by a handler: sent as X-Service-Error
 };
 
@@ -107,9 +110,8 @@ struct Endpoint {
     const gp::Descriptor* response;
     bool secure;
     bool listed; // sent in getSvcEndpointList
-    // Parses the body, runs the handler, returns the serialized answer.
     std::function<std::string(Context&, const QByteArray&)> run;
-    bool discovery = false; // club discovery mode only (config egs.club_discovery)
+    enum class Discovery { None, Clubs, Friends } discovery = Discovery::None;
 };
 
 template <class Req, class Resp>
@@ -135,16 +137,16 @@ Endpoint endpoint(const char* service, const char* method, bool secure, bool lis
     return e;
 }
 
-// Club discovery mode: the method is listed so the game sends it
 template <class Req, class Resp>
-Endpoint discoveryEndpoint(const char* service, const char* method) {
-    Endpoint e =
-        endpoint<Req, Resp>(service, method, false, true, [](Context&, const Req&, Resp&) {});
-    e.discovery = true;
-    e.run = [service, method](Context& ctx, const QByteArray& body) {
+Endpoint discoveryEndpoint(Endpoint::Discovery group, const char* service, const char* method) {
+    Endpoint e = endpoint<Req, Resp>(service, method, false, true,
+                                     [](Context&, const Req&, Resp&) {});
+    e.discovery = group;
+    const char* label = group == Endpoint::Discovery::Clubs ? "club" : "friends";
+    e.run = [service, method, label](Context& ctx, const QByteArray& body) {
         Req req;
         req.ParseFromArray(body.constData(), static_cast<int>(body.size()));
-        qCInfo(lcEgs).noquote() << "club discovery:" << service << method << "from"
+        qCInfo(lcEgs).noquote() << label << "discovery:" << service << method << "from"
                                 << egsSessionName(ctx.sessionKey) << "-"
                                 << qs(req.ShortDebugString()) << "(answered 503)";
         ctx.status = 503;
@@ -219,8 +221,8 @@ void minimalProfiles(Context&, const GetMinimalProfilesRequest& req,
         }
         names << QStringLiteral("%1=%2").arg(id).arg(name);
     }
-    qCInfo(lcEgs).noquote() << "profiles for" << req.accounts_size()
-                            << "accounts:" << names.join(QStringLiteral(", "));
+    qCInfo(lcEgs).noquote() << "profiles for" << req.accounts_size() << "accounts:"
+                            << names.join(QStringLiteral(", "));
 }
 
 void aggregatedProfiles(Context&, const GetAggregatedProfilesRequest& req,
@@ -240,8 +242,7 @@ void aggregatedProfiles(Context&, const GetAggregatedProfilesRequest& req,
         AccountRef* a = resp.add_profiles()->mutable_account();
         a->set_id(id);
         a->set_name(name.toStdString());
-        found << QStringLiteral("%1=%2%3").arg(name).arg(id).arg(known ? QString()
-                                                                       : QStringLiteral(" (new)"));
+        found << QStringLiteral("%1=%2%3").arg(name).arg(id).arg(known ? QString() : QStringLiteral(" (new)"));
     }
     qCInfo(lcEgs).noquote() << "aggregated profiles:" << found.join(QStringLiteral(", "));
 }
@@ -260,11 +261,10 @@ void friends(Context& ctx, const GetFriendsRequest&, GetFriendsResponse& resp) {
         names << p.name;
     }
     qCInfo(lcEgs).noquote() << "friends of" << (me.isEmpty() ? QStringLiteral("?") : me) << "->"
-                            << names.size()
-                            << (names.isEmpty() ? QString() : names.join(QStringLiteral(", ")));
+                            << names.size() << (names.isEmpty() ? QString() : names.join(QStringLiteral(", ")));
 }
 
-// systemService.getTimeInfo, transactionService
+// ---- systemService.getTimeInfo, transactionService ----------------------------------------------
 
 void timeInfo(Context&, const Empty&, GetTimeInfoResponse& resp) {
     resp.set_timestamp(QDateTime::currentMSecsSinceEpoch());
@@ -275,32 +275,31 @@ Session* sessionOf(const Context& ctx) {
     return it == sessions().byKey.end() ? nullptr : &*it;
 }
 
-std::function<void(Context&, const TransactionRequest&, TransactionResponse&)> transactionCall(
-    const char* method, bool startNew) {
-    return
-        [method, startNew](Context& ctx, const TransactionRequest& req, TransactionResponse& resp) {
-            QMutexLocker lock(&sessions().mutex);
-            Session* s = sessionOf(ctx);
-            if (!s) {
-                resp.set_currenttransactionid("0");
-                return;
-            }
-            const QString before = s->transaction;
-            if (startNew || s->transaction.isEmpty()) {
-                s->transaction = QString::number(++s->transactionCounter);
-            }
-            resp.set_currenttransactionid(s->transaction.toStdString());
-            qCInfo(lcEgs).noquote()
-                << "transaction" << method << "for" << s->name
-                << (req.has_currenttransactionid()
-                        ? QStringLiteral("(completes %1)").arg(qs(req.currenttransactionid()))
-                        : QString())
-                << "->" << s->transaction
-                << (before == s->transaction ? QString() : QStringLiteral("(new)"));
-        };
+std::function<void(Context&, const TransactionRequest&, TransactionResponse&)>
+transactionCall(const char* method, bool startNew) {
+    return [method, startNew](Context& ctx, const TransactionRequest& req,
+                              TransactionResponse& resp) {
+        QMutexLocker lock(&sessions().mutex);
+        Session* s = sessionOf(ctx);
+        if (!s) {
+            resp.set_currenttransactionid("0");
+            return;
+        }
+        const QString before = s->transaction;
+        if (startNew || s->transaction.isEmpty()) {
+            s->transaction = QString::number(++s->transactionCounter);
+        }
+        resp.set_currenttransactionid(s->transaction.toStdString());
+        qCInfo(lcEgs).noquote() << "transaction" << method << "for" << s->name
+                                << (req.has_currenttransactionid()
+                                        ? QStringLiteral("(completes %1)").arg(qs(req.currenttransactionid()))
+                                        : QString())
+                                << "->" << s->transaction
+                                << (before == s->transaction ? QString() : QStringLiteral("(new)"));
+    };
 }
 
-// profileService: fame
+// ---- profileService: fame -------------------------------------------------------------------------
 
 qint64 sessionAccount(const Context& ctx, QString* name = nullptr) {
     QMutexLocker lock(&sessions().mutex);
@@ -333,8 +332,7 @@ void getFame(Context& ctx, const Empty&, GetFameResponse& resp) {
 void updateFame(Context& ctx, const UpdateFameRequest& req, UpdateFameResponse& resp) {
     QString name;
     const qint64 account = sessionAccount(ctx, &name);
-    db::Fame f =
-        (account ? db::fame(account) : std::nullopt).value_or(db::Fame{account, 0, {}, {}, 0});
+    db::Fame f = (account ? db::fame(account) : std::nullopt).value_or(db::Fame{account, 0, {}, {}, 0});
     const qint64 sent = req.playertotalclientfame();
     if (account != 0) {
         f.xp = std::max(f.xp, sent);
@@ -346,7 +344,6 @@ void updateFame(Context& ctx, const UpdateFameRequest& req, UpdateFameResponse& 
         }
         f.updated = QDateTime::currentMSecsSinceEpoch();
         db::putFame(f);
-        // Keep the OTG fame leaderboard (scores/fame/player) in step: kind 2 = plain points.
         const QString entrant = QString::number(account);
         const quint64 score = (quint64(2) << 60) | quint64(f.xp);
         const auto old = db::score(QStringLiteral("fame/player"), entrant);
@@ -358,16 +355,15 @@ void updateFame(Context& ctx, const UpdateFameRequest& req, UpdateFameResponse& 
     after->set_xp(f.xp);
     after->set_serverxp(0);
     resp.mutable_clubprogression()->mutable_after()->set_xp(0);
-    qCInfo(lcEgs).noquote()
-        << "fame update from" << (name.isEmpty() ? QStringLiteral("?") : name) << "total" << sent
-        << "-> stored" << f.xp
-        << (req.clubfamedelta() > 0
-                ? QStringLiteral("(club delta %1 ignored: no clubs yet)").arg(req.clubfamedelta())
-                : QString())
-        << "transaction" << qs(req.transactionid());
+    qCInfo(lcEgs).noquote() << "fame update from" << (name.isEmpty() ? QStringLiteral("?") : name)
+                            << "total" << sent << "-> stored" << f.xp
+                            << (req.clubfamedelta() > 0
+                                    ? QStringLiteral("(club delta %1 ignored: no clubs yet)").arg(req.clubfamedelta())
+                                    : QString())
+                            << "transaction" << qs(req.transactionid());
 }
 
-// storageService: ghosts
+// ---- storageService: ghosts ----------------------------------------------------------------------
 
 QString bobChecksum(const QByteArray& data) {
     return QString::fromLatin1(QCryptographicHash::hash(data, QCryptographicHash::Md5).toBase64());
@@ -379,15 +375,16 @@ void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& res
     const QByteArray data(req.body().data(), static_cast<qsizetype>(req.body().size()));
     if (account == 0) {
         ctx.status = 500;
-        qCWarning(lcEgs).noquote()
-            << "ghost upload without a session refused (" << data.size() << "bytes)";
+        qCWarning(lcEgs).noquote() << "ghost upload without a session refused (" << data.size()
+                                   << "bytes)";
         return;
     }
     const QString sent = qs(req.checksum());
     const QString actual = bobChecksum(data);
     if (!sent.isEmpty() && sent != actual) {
-        qCWarning(lcEgs).noquote()
-            << "ghost from" << name << "has checksum" << sent << "but the data gives" << actual;
+        // Stored anyway, with the checksum we computed: the game checks downloads against it.
+        qCWarning(lcEgs).noquote() << "ghost from" << name << "has checksum" << sent
+                                   << "but the data gives" << actual;
     }
     if (req.has_contentlength() && req.contentlength() != data.size()) {
         qCWarning(lcEgs).noquote() << "ghost from" << name << "says" << req.contentlength()
@@ -415,8 +412,8 @@ void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& res
     }
     if (id == 0) {
         ctx.status = 500; // the game marks the upload failed (0x41B6E0) and races on
-        qCWarning(lcEgs).noquote()
-            << "ghost from" << name << "not stored (" << data.size() << "bytes)";
+        qCWarning(lcEgs).noquote() << "ghost from" << name << "not stored (" << data.size()
+                                   << "bytes)";
         return;
     }
     const QString url = otgBaseUrl(ctx.request) + QStringLiteral("/ghosts/%1").arg(id);
@@ -447,7 +444,7 @@ void getRemoteUrl(Context& ctx, const GetRemoteUrlRequest& req, GetRemoteUrlResp
                             << url;
 }
 
-// statsService.getAccountStats
+// ---- statsService.getAccountStats -----------------------------------------------------------------
 const QString StatsResource = QStringLiteral("stats/V06/player/%1");
 
 struct StatColumn {
@@ -456,6 +453,7 @@ struct StatColumn {
     const char* counter;
 };
 
+// Per-subject sets: the category their subjects come from; all have the same six columns.
 const QList<QPair<QString, QString>>& rowSets() {
     static const QList<QPair<QString, QString>> sets = {
         {QStringLiteral("Tracks"), QStringLiteral("track")},
@@ -529,8 +527,7 @@ EgsStatsTable statsTable(qint64 accountId, const QString& set) {
         counts = g->counts;
         t.stored = true;
     }
-    const auto fixed = [&](const StatColumn* first, const StatColumn* last,
-                           const QString& category) {
+    const auto fixed = [&](const StatColumn* first, const StatColumn* last, const QString& category) {
         QList<qint64> values;
         for (const StatColumn* c = first; c != last; ++c) {
             t.columns << QString::fromLatin1(c->name);
@@ -541,8 +538,7 @@ EgsStatsTable statsTable(qint64 accountId, const QString& set) {
         t.known = true;
     };
     if (set == QLatin1String("Overdrive")) {
-        fixed(std::begin(OverdriveColumns), std::end(OverdriveColumns),
-              QStringLiteral("overdrive"));
+        fixed(std::begin(OverdriveColumns), std::end(OverdriveColumns), QStringLiteral("overdrive"));
         return t;
     }
     if (set == QLatin1String("FaceOff")) {
@@ -557,6 +553,7 @@ EgsStatsTable statsTable(qint64 accountId, const QString& set) {
         for (const StatColumn& c : RowColumns) {
             t.columns << QString::fromLatin1(c.name);
         }
+        // Every subject with a counter in this category, in key order.
         const QString marker = QLatin1Char('/') + category + QLatin1Char('/');
         QStringList subjects;
         for (auto it = counts.constBegin(); it != counts.constEnd(); ++it) {
@@ -578,6 +575,7 @@ EgsStatsTable statsTable(qint64 accountId, const QString& set) {
 
 void accountStats(Context& ctx, const GetAccountStatsRequest& req, GetAccountStatsResponse& resp) {
     const QString set = qs(req.columndefinitionsetname());
+    // Whose stats: an asked account, else the caller. Clubs are not implemented: no rows.
     const bool club = req.currentclub() || req.clubs_size() > 0;
     const qint64 account = req.accounts_size() > 0 ? req.accounts(0).id() : sessionAccount(ctx);
     EgsStatsTable t = statsTable(club ? 0 : account, set);
@@ -602,9 +600,9 @@ void accountStats(Context& ctx, const GetAccountStatsRequest& req, GetAccountSta
     qCInfo(lcEgs).noquote() << "stats" << set << "for"
                             << (club ? QStringLiteral("a club") : egsPlayerName(account)) << "->"
                             << resp.stats_size() << (resp.stats_size() == 1 ? "row" : "rows")
-                            << (club        ? QStringLiteral("(clubs not implemented)")
-                                : !t.stored ? QStringLiteral("(no stats stored yet)")
-                                            : QString());
+                            << (club ? QStringLiteral("(clubs not implemented)")
+                                     : !t.stored ? QStringLiteral("(no stats stored yet)")
+                                                 : QString());
 }
 
 const QList<Endpoint>& endpoints() {
@@ -637,9 +635,9 @@ const QList<Endpoint>& endpoints() {
         endpoint<GetFriendsRequest, GetFriendsResponse>("friendsListService", "getFriends", false,
                                                         true, friends),
         endpoint<Empty, GetTimeInfoResponse>("systemService", "getTimeInfo", false, true, timeInfo),
-        endpoint<TransactionRequest, TransactionResponse>("transactionService", "newTransaction",
-                                                          false, true,
-                                                          transactionCall("newTransaction", true)),
+        endpoint<TransactionRequest, TransactionResponse>(
+            "transactionService", "newTransaction", false, true,
+            transactionCall("newTransaction", true)),
         endpoint<TransactionRequest, TransactionResponse>(
             "transactionService", "getCurrentTransaction", false, true,
             transactionCall("getCurrentTransaction", false)),
@@ -653,38 +651,69 @@ const QList<Endpoint>& endpoints() {
             "transactionService", "cancelCurrentTransaction", false, true,
             transactionCall("cancelCurrentTransaction", true)),
         endpoint<Empty, GetFameResponse>("profileService", "getFame", false, true, getFame),
-        endpoint<UpdateFameRequest, UpdateFameResponse>("profileService", "updateFameInTransaction",
-                                                        false, true, updateFame),
+        endpoint<UpdateFameRequest, UpdateFameResponse>(
+            "profileService", "updateFameInTransaction", false, true, updateFame),
         endpoint<CreateBobRequest, CreateBobResponse>("storageService", "createBob", false, true,
                                                       createBob),
-        endpoint<GetRemoteUrlRequest, GetRemoteUrlResponse>("storageService", "getRemoteUrl", false,
-                                                            true, getRemoteUrl),
+        endpoint<GetRemoteUrlRequest, GetRemoteUrlResponse>("storageService", "getRemoteUrl",
+                                                            false, true, getRemoteUrl),
         endpoint<GetAccountStatsRequest, GetAccountStatsResponse>("statsService", "getAccountStats",
                                                                   false, true, accountStats),
         // Club discovery mode (off unless config.json egs.club_discovery is true).
-        discoveryEndpoint<ClubCreateRequest, ClubReply>("clubService", "createAndJoin"),
-        discoveryEndpoint<ClubNameMessage, ClubNameMessage>("clubService", "sanitize"),
-        discoveryEndpoint<QueryClubsRequest, ClubListResponse>("clubService", "queryClubs"),
-        discoveryEndpoint<ClubQuickSearchRequest, ClubListResponse>("clubService", "quickSearch"),
-        discoveryEndpoint<ClubAccountsRequest, ClubReply>("clubService", "join"),
-        discoveryEndpoint<ClubIdRequest, ClubReply>("clubService", "requestJoin"),
-        discoveryEndpoint<ClubIdRequest, ClubReply>("clubService", "leave"),
-        discoveryEndpoint<ClubAccountsRequest, Empty>("clubService", "invite"),
-        discoveryEndpoint<FindClubInvitesRequest, ClubInvitesResponse>("clubService",
-                                                                       "findInvites"),
-        discoveryEndpoint<ClubIdRequest, Empty>("clubService", "rejectInvite"),
-        discoveryEndpoint<ClubIdRequest, Empty>("clubService", "rejectJoinRequest"),
-        discoveryEndpoint<ClubMembershipRequest, ClubReply>("clubService", "updateMembership"),
+        discoveryEndpoint<ClubCreateRequest, ClubReply>(
+            Endpoint::Discovery::Clubs, "clubService", "createAndJoin"),
+        discoveryEndpoint<ClubNameMessage, ClubNameMessage>(
+            Endpoint::Discovery::Clubs, "clubService", "sanitize"),
+        discoveryEndpoint<QueryClubsRequest, ClubListResponse>(
+            Endpoint::Discovery::Clubs, "clubService", "queryClubs"),
+        discoveryEndpoint<ClubQuickSearchRequest, ClubListResponse>(
+            Endpoint::Discovery::Clubs, "clubService", "quickSearch"),
+        discoveryEndpoint<ClubAccountsRequest, ClubReply>(
+            Endpoint::Discovery::Clubs, "clubService", "join"),
+        discoveryEndpoint<ClubIdRequest, ClubReply>(
+            Endpoint::Discovery::Clubs, "clubService", "requestJoin"),
+        discoveryEndpoint<ClubIdRequest, ClubReply>(
+            Endpoint::Discovery::Clubs, "clubService", "leave"),
+        discoveryEndpoint<ClubAccountsRequest, Empty>(
+            Endpoint::Discovery::Clubs, "clubService", "invite"),
+        discoveryEndpoint<FindClubInvitesRequest, ClubInvitesResponse>(
+            Endpoint::Discovery::Clubs, "clubService", "findInvites"),
+        discoveryEndpoint<ClubIdRequest, Empty>(
+            Endpoint::Discovery::Clubs, "clubService", "rejectInvite"),
+        discoveryEndpoint<ClubIdRequest, Empty>(
+            Endpoint::Discovery::Clubs, "clubService", "rejectJoinRequest"),
+        discoveryEndpoint<ClubMembershipRequest, ClubReply>(
+            Endpoint::Discovery::Clubs, "clubService", "updateMembership"),
         discoveryEndpoint<UpdateCustomizationRequest, UpdateCustomizationResponse>(
-            "clubService", "updateCustomization"),
-        discoveryEndpoint<GetKeywordsRequest, GetKeywordsResponse>("keywordService", "getKeywords"),
+            Endpoint::Discovery::Clubs, "clubService", "updateCustomization"),
+        discoveryEndpoint<GetKeywordsRequest, GetKeywordsResponse>(
+            Endpoint::Discovery::Clubs, "keywordService", "getKeywords"),
+        // Friends discovery mode (off unless config.json egs.friends_discovery is true).
+        discoveryEndpoint<FriendsChangeRequest, GetFriendsResponse>(
+            Endpoint::Discovery::Friends, "friendsListService", "addFriends"),
+        discoveryEndpoint<FriendsChangeRequest, GetFriendsResponse>(
+            Endpoint::Discovery::Friends, "friendsListService", "removeFriends"),
+        discoveryEndpoint<AccountQuickSearchRequest, AccountListResponse>(
+            Endpoint::Discovery::Friends, "accountService", "quickSearch"),
     };
     return list;
 }
 
+bool discoveryOn(const Endpoint& e) {
+    switch (e.discovery) {
+    case Endpoint::Discovery::Clubs:
+        return config().clubDiscovery;
+    case Endpoint::Discovery::Friends:
+        return config().friendsDiscovery;
+    case Endpoint::Discovery::None:
+        break;
+    }
+    return true;
+}
+
 const Endpoint* findEndpoint(const QString& service, const QString& method) {
     for (const Endpoint& e : endpoints()) {
-        if (e.discovery && !config().clubDiscovery) {
+        if (!discoveryOn(e)) {
             continue;
         }
         if (e.service == service && e.method == method) {
@@ -697,7 +726,7 @@ const Endpoint* findEndpoint(const QString& service, const QString& method) {
 std::string endpointList() {
     SvcEndpointDescriptorList list;
     for (const Endpoint& e : endpoints()) {
-        if (!e.listed || (e.discovery && !config().clubDiscovery)) {
+        if (!e.listed || !discoveryOn(e)) {
             continue;
         }
         SvcEndpointDescriptor* d = list.add_endpoints();
@@ -849,7 +878,6 @@ QString egsDescribeBody(const QString& path, bool response, int status, const QB
     if (!msg->ParseFromArray(body.constData(), static_cast<int>(body.size()))) {
         return QStringLiteral("(does not parse as %1)").arg(qs(type->name()));
     }
-    // Large bytes fields (a ghost in createBob is up to ~150 KB) are shown by size only.
     const gp::Reflection* reflection = msg->GetReflection();
     for (int i = 0; i < type->field_count(); ++i) {
         const gp::FieldDescriptor* field = type->field(i);
@@ -907,6 +935,7 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
         return true;
     }
 
+    // Runs the handler and sends its answer. `request` is copied: logins finish asynchronously.
     auto run = [e, service, method, sessionKey, respond](const HttpRequest& req,
                                                          const AuthResult& auth) {
         Context ctx{req, sessionKey, {}, 200, auth};
@@ -936,6 +965,7 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
         return true;
     }
 
+    // Logins: check the NP authorization code with shadNet first.
     OAuthLoginRequest login;
     login.ParseFromArray(request.body.constData(), static_cast<int>(request.body.size()));
     verifyCode(
@@ -945,6 +975,8 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
                 run(request, auth);
                 return;
             }
+            // Answers >= 500 are decoded as StatusResult; the login error path reads
+            // retryHint. The X-Service-Error texts are the game's own error strings.
             StatusResult result;
             result.set_retryhint(auth.unavailable ? 30 : 300);
             const std::string out = result.SerializeAsString();
@@ -1006,11 +1038,8 @@ void egsSetFame(qint64 accountId, qint64 xp) {
     f.xp = std::max<qint64>(0, xp);
     f.updated = QDateTime::currentMSecsSinceEpoch();
     db::putFame(f);
-    db::putScore({QStringLiteral("fame/player"),
-                  QString::number(accountId),
-                  (quint64(2) << 60) | quint64(f.xp),
-                  {},
-                  f.updated});
+    db::putScore({QStringLiteral("fame/player"), QString::number(accountId),
+                  (quint64(2) << 60) | quint64(f.xp), {}, f.updated});
     qCInfo(lcEgs).noquote() << "fame of" << egsPlayerName(accountId) << "set to" << f.xp
                             << "(admin)";
 }
@@ -1020,7 +1049,8 @@ QList<EgsSessionInfo> egsSessions() {
     QList<EgsSessionInfo> out;
     for (const Session& s : sessions().byKey) {
         out.append({QString::fromLatin1(s.key), s.name, s.accountId, s.shadnetAccount,
-                    s.clientVersion, s.psPlus, s.created, s.lastSeen, s.requests, s.transaction});
+                    s.clientVersion, s.psPlus, s.created, s.lastSeen, s.requests,
+                    s.transaction});
     }
     return out;
 }
