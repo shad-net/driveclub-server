@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.7
+
+- Fixed a key issue in accolades
+
+- Real friends support
+
+- Added quick search
+
+- Removed deprecated friends discovery , everything is implemented now.
+
 ## 0.0.6
 
 - FriendNames`gains`optional FriendNamesType type = 2 (should fix friends discovery crash)
