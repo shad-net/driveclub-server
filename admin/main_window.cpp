@@ -315,9 +315,9 @@ QWidget* MainWindow::buildPlayersTab() {
     layout->addWidget(new QLabel(
         tr("<b>Known players</b> (everyone who logged in, plus names from friend lookups and "
            "test entries; Fame as the game last reported it)")));
-    playerTable_ =
-        makeTable({tr("Name"), tr("Account ID"), tr("Logged in"), tr("shadNet account"), tr("Fame"),
-                   tr("Stars"), tr("Fame updated"), tr("First seen"), tr("Last login")});
+    playerTable_ = makeTable({tr("Name"), tr("Account ID"), tr("Logged in"), tr("shadNet account"),
+                              tr("Fame"), tr("Stars"), tr("Fame updated"), tr("First seen"),
+                              tr("Last login"), tr("Friends")});
     layout->addWidget(playerTable_, 3);
     setFame_ = new QPushButton(tr("Set Fame..."));
     setFame_->setToolTip(tr("Set the player's Fame exactly (also their Fame leaderboard entry). "
@@ -762,6 +762,16 @@ void MainWindow::showPlayers(const QJsonArray& players) {
                               cell(p.value("logged_in").toBool()
                                        ? ago(p.value("last_seen").toDouble())
                                        : QStringLiteral("-")));
+        QStringList friends;
+        for (const QJsonValue& f : p.value("friends").toArray()) {
+            friends << f.toString();
+        }
+        auto* friendCell = cell(friends.isEmpty() ? QString()
+                                                  : QStringLiteral("%1: %2")
+                                                        .arg(friends.size())
+                                                        .arg(friends.join(QStringLiteral(", "))));
+        friendCell->setToolTip(friends.join('\n'));
+        playerTable_->setItem(i, 9, friendCell);
     }
     playerTable_->setSortingEnabled(true);
     playerTable_->resizeColumnsToContents();

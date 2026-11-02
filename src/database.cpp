@@ -108,6 +108,16 @@ const char* const Migrations[] = {
         PRIMARY KEY (account_id, name)
     );
     )",
+    // 6: friend lists (friendsListService), kept in step with each player's PSN friends by the
+    // game's addFriends / removeFriends after login. Names are PSN online ids.
+    R"(
+    CREATE TABLE friends (
+        account_id INTEGER NOT NULL,
+        name       TEXT NOT NULL COLLATE NOCASE,
+        added      INTEGER NOT NULL,
+        PRIMARY KEY (account_id, name)
+    );
+    )",
 };
 
 QMutex& lock() {
@@ -682,6 +692,50 @@ bool removeAccolades(qint64 accountId) {
     q.prepare(QStringLiteral("DELETE FROM accolades WHERE account_id = ?"));
     q.addBindValue(accountId);
     return run(q, "remove accolades") && q.numRowsAffected() > 0;
+}
+
+// ---- Friends ----------------------------------------------------------------------------------
+
+QStringList friendNames(qint64 accountId) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT name FROM friends WHERE account_id = ? ORDER BY name"));
+    q.addBindValue(accountId);
+    QStringList out;
+    if (run(q, "read friends")) {
+        while (q.next()) {
+            out.append(q.value(0).toString());
+        }
+    }
+    return out;
+}
+
+bool addFriend(qint64 accountId, const QString& name) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(
+        QStringLiteral("INSERT OR IGNORE INTO friends (account_id, name, added) VALUES (?, ?, ?)"));
+    q.addBindValue(accountId);
+    q.addBindValue(text(name));
+    q.addBindValue(now());
+    return run(q, "add friend") && q.numRowsAffected() > 0;
+}
+
+bool removeFriend(qint64 accountId, const QString& name) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("DELETE FROM friends WHERE account_id = ? AND name = ?"));
+    q.addBindValue(accountId);
+    q.addBindValue(text(name));
+    return run(q, "remove friend") && q.numRowsAffected() > 0;
+}
+
+bool hasFriendList(qint64 accountId) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT 1 FROM friends WHERE account_id = ? LIMIT 1"));
+    q.addBindValue(accountId);
+    return run(q, "check friends") && q.next();
 }
 
 // ---- Ghosts -----------------------------------------------------------------------------------

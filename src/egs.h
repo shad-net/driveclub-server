@@ -18,6 +18,7 @@ struct EgsConfig {
     QString version = QStringLiteral("1");
     bool clubDiscovery = false;
     bool friendsDiscovery = false;
+    bool friendLists = true;
 };
 
 void setEgsConfig(const EgsConfig& config);

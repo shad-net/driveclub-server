@@ -124,6 +124,13 @@ qint64 addAccoladeProgress(qint64 accountId, const QString& name, qint64 delta);
 QList<qint64> accoladeAccounts();
 bool removeAccolades(qint64 accountId);
 
+// ---- Friends ----------------------------------------------------------------------------------
+
+QStringList friendNames(qint64 accountId);
+bool addFriend(qint64 accountId, const QString& name);    // false when already there
+bool removeFriend(qint64 accountId, const QString& name); // false when not there
+bool hasFriendList(qint64 accountId);
+
 // ---- Ghosts -----------------------------------------------------------------------------------
 
 struct Ghost {

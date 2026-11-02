@@ -323,6 +323,8 @@ HttpResponse AdminService::route(const HttpRequest& request) {
                           {QStringLiteral("shadnet_account"), p.shadnetAccount},
                           {QStringLiteral("first_seen"), double(p.firstSeen)},
                           {QStringLiteral("last_seen"), double(p.lastSeen)}};
+            o.insert(QStringLiteral("friends"),
+                     QJsonArray::fromStringList(db::friendNames(p.accountId)));
             if (const auto f = db::fame(p.accountId)) {
                 o.insert(QStringLiteral("fame"), f->xp);
                 o.insert(QStringLiteral("fame_updated"), double(f->updated));
