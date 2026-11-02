@@ -25,6 +25,7 @@
 #include <QStringList>
 #include <QUuid>
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <string>
@@ -108,15 +109,8 @@ struct Endpoint {
     const gp::Descriptor* response;
     bool secure;
     bool listed; // sent in getSvcEndpointList
-    // Parses the body, runs the handler, returns the serialized answer.
     std::function<std::string(Context&, const QByteArray&)> run;
-    enum class Discovery {
-        None,
-        Clubs,
-        Friends,
-        FriendSync,
-        FriendLists
-    } discovery = Discovery::None;
+    enum class Discovery { None, Clubs, FriendLists } discovery = Discovery::None;
 };
 
 template <class Req, class Resp>
@@ -152,7 +146,7 @@ Endpoint discoveryEndpoint(Endpoint::Discovery group, const char* service, const
     Endpoint e =
         endpoint<Req, Resp>(service, method, false, true, [](Context&, const Req&, Resp&) {});
     e.discovery = group;
-    const char* label = group == Endpoint::Discovery::Clubs ? "club" : "friends";
+    const char* label = "club";
     e.run = [service, method, label](Context& ctx, const QByteArray& body) {
         Req req;
         req.ParseFromArray(body.constData(), static_cast<int>(body.size()));
@@ -333,6 +327,34 @@ void removeFriends(Context& ctx, const FriendsChangeRequest& req, GetFriendsResp
     changeFriends(ctx, req, resp, false);
 }
 
+void quickSearch(Context& ctx, const AccountQuickSearchRequest& req, AccountListResponse& resp) {
+    QString me;
+    sessionAccount(ctx, &me);
+    const QString prefix = qs(req.startswith()).trimmed();
+    const int limit = req.maximumentries() > 0 ? req.maximumentries() : 100;
+    QList<EgsPlayerInfo> found;
+    for (const EgsPlayerInfo& p : egsPlayers()) {
+        if (p.name.compare(me, Qt::CaseInsensitive) != 0 &&
+            p.name.startsWith(prefix, Qt::CaseInsensitive)) {
+            found.append(p);
+        }
+    }
+    std::sort(found.begin(), found.end(), [](const EgsPlayerInfo& a, const EgsPlayerInfo& b) {
+        return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
+    });
+    QStringList names;
+    for (const EgsPlayerInfo& p : found.mid(0, limit)) {
+        resp.add_accounts()->set_id(p.accountId);
+        names << p.name;
+    }
+    qCInfo(lcEgs).noquote() << "player search" << QStringLiteral("\"%1\"").arg(prefix) << "from"
+                            << (me.isEmpty() ? QStringLiteral("?") : me) << "->" << names.size()
+                            << (names.isEmpty() ? QString() : names.join(QStringLiteral(", ")))
+                            << (found.size() > limit
+                                    ? QStringLiteral("(%1 more not sent)").arg(found.size() - limit)
+                                    : QString());
+}
+
 // ---- systemService.getTimeInfo, transactionService ----------------------------------------------
 
 void timeInfo(Context&, const Empty&, GetTimeInfoResponse& resp) {
@@ -437,7 +459,6 @@ void updateFame(Context& ctx, const UpdateFameRequest& req, UpdateFameResponse& 
 }
 
 // ---- objectiveService: accolades
-// -----------------------------------------------------------------
 
 void fillAccolades(AccoladeProgressResponse& resp, qint64 account, const QString& only) {
     for (const db::Accolade& a : db::accolades(account)) {
@@ -542,7 +563,6 @@ void updateAccolades(Context& ctx, const UpdateAccoladeProgressRequest& req,
 }
 
 // ---- storageService: ghosts
-// ----------------------------------------------------------------------
 
 QString bobChecksum(const QByteArray& data) {
     return QString::fromLatin1(QCryptographicHash::hash(data, QCryptographicHash::Md5).toBase64());
@@ -553,6 +573,8 @@ void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& res
     const qint64 account = sessionAccount(ctx, &name);
     const QByteArray data(req.body().data(), static_cast<qsizetype>(req.body().size()));
     if (account == 0) {
+        // Signed with no current session (an old key after a re-login, or not a game at all):
+        // a ghost needs an owner, so refuse it like a failed upload.
         ctx.status = 500;
         qCWarning(lcEgs).noquote()
             << "ghost upload without a session refused (" << data.size() << "bytes)";
@@ -572,6 +594,8 @@ void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& res
     g.accountId = account;
     g.mimeType = qs(req.mimetype());
     g.checksum = actual;
+    // After a login the game may upload a ghost it already sent (seen 28 Oct: same checksum, new
+    // id, used by no score). Hand back the stored copy instead of keeping the same data twice.
     qint64 id = 0;
     bool reused = false;
     if (!data.isEmpty()) {
@@ -589,7 +613,7 @@ void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& res
         }
     }
     if (id == 0) {
-        ctx.status = 500;
+        ctx.status = 500; // the game marks the upload failed (0x41B6E0) and races on
         qCWarning(lcEgs).noquote()
             << "ghost from" << name << "not stored (" << data.size() << "bytes)";
         return;
@@ -623,7 +647,6 @@ void getRemoteUrl(Context& ctx, const GetRemoteUrlRequest& req, GetRemoteUrlResp
 }
 
 // ---- statsService.getAccountStats
-// -----------------------------------------------------------------
 
 const QString StatsResource = QStringLiteral("stats/V06/player/%1");
 
@@ -633,6 +656,7 @@ struct StatColumn {
     const char* counter;
 };
 
+// Per-subject sets: the category their subjects come from; all have the same six columns.
 const QList<QPair<QString, QString>>& rowSets() {
     static const QList<QPair<QString, QString>> sets = {
         {QStringLiteral("Tracks"), QStringLiteral("track")},
@@ -734,6 +758,7 @@ EgsStatsTable statsTable(qint64 accountId, const QString& set) {
         for (const StatColumn& c : RowColumns) {
             t.columns << QString::fromLatin1(c.name);
         }
+        // Every subject with a counter in this category, in key order.
         const QString marker = QLatin1Char('/') + category + QLatin1Char('/');
         QStringList subjects;
         for (auto it = counts.constBegin(); it != counts.constEnd(); ++it) {
@@ -881,11 +906,6 @@ const QList<Endpoint>& endpoints() {
             Endpoint::Discovery::Clubs, "clubService", "updateCustomization"),
         discoveryEndpoint<GetKeywordsRequest, GetKeywordsResponse>(Endpoint::Discovery::Clubs,
                                                                    "keywordService", "getKeywords"),
-        // Friends discovery mode (off unless config.json egs.friends_discovery is true).
-        discoveryEndpoint<FriendsChangeRequest, GetFriendsResponse>(
-            Endpoint::Discovery::FriendSync, "friendsListService", "addFriends"),
-        discoveryEndpoint<FriendsChangeRequest, GetFriendsResponse>(
-            Endpoint::Discovery::FriendSync, "friendsListService", "removeFriends"),
         // Real friend lists (config.json egs.friend_lists, on by default).
         withGroup(endpoint<FriendsChangeRequest, GetFriendsResponse>(
                       "friendsListService", "addFriends", false, true, addFriends),
@@ -893,8 +913,8 @@ const QList<Endpoint>& endpoints() {
         withGroup(endpoint<FriendsChangeRequest, GetFriendsResponse>(
                       "friendsListService", "removeFriends", false, true, removeFriends),
                   Endpoint::Discovery::FriendLists),
-        discoveryEndpoint<AccountQuickSearchRequest, AccountListResponse>(
-            Endpoint::Discovery::Friends, "accountService", "quickSearch"),
+        endpoint<AccountQuickSearchRequest, AccountListResponse>("accountService", "quickSearch",
+                                                                 false, true, quickSearch),
     };
     return list;
 }
@@ -903,10 +923,6 @@ bool discoveryOn(const Endpoint& e) {
     switch (e.discovery) {
     case Endpoint::Discovery::Clubs:
         return config().clubDiscovery;
-    case Endpoint::Discovery::Friends:
-        return config().friendsDiscovery;
-    case Endpoint::Discovery::FriendSync:
-        return config().friendsDiscovery && !config().friendLists;
     case Endpoint::Discovery::FriendLists:
         return config().friendLists;
     case Endpoint::Discovery::None:
@@ -1120,8 +1136,6 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
     }
     const QString service = parts.value(0);
     const QString method = parts.value(1);
-
-    // Which session signed this? Unknown signatures are answered anyway (logged by the trace).
     const auto found =
         egsFindSessionKey(method, request.body, request.headers.value("x-request-signature"));
     const QByteArray sessionKey = found.value_or(QByteArray());
@@ -1138,7 +1152,6 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
         return true;
     }
 
-    // Runs the handler and sends its answer. `request` is copied: logins finish asynchronously.
     auto run = [e, service, method, sessionKey, respond](const HttpRequest& req,
                                                          const AuthResult& auth) {
         Context ctx{req, sessionKey, {}, 200, auth};

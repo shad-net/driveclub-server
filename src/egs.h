@@ -17,7 +17,6 @@ struct EgsConfig {
     QString serverIdentifier = QStringLiteral("dc-community");
     QString version = QStringLiteral("1");
     bool clubDiscovery = false;
-    bool friendsDiscovery = false;
     bool friendLists = true;
 };
 

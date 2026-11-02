@@ -129,14 +129,6 @@ int main(int argc, char* argv[]) {
     qInfo(config->egs.friendLists
               ? "friend lists on (egs.friend_lists): each player's friends follow their PSN friends"
               : "friend lists off (egs.friend_lists): every player is everyone's friend");
-    if (config->egs.friendsDiscovery) {
-        qWarning(config->egs.friendLists
-                     ? "friends discovery mode is on (egs.friends_discovery): "
-                       "accountService.quickSearch is listed, logged and answered 503"
-                     : "friends discovery mode is on (egs.friends_discovery): addFriends, "
-                       "removeFriends and accountService.quickSearch are listed, logged and "
-                       "answered 503");
-    }
     if (config->egs.clubDiscovery) {
         qWarning("club discovery mode is on (egs.club_discovery): club requests are listed, logged "
                  "and answered 503");
