@@ -60,6 +60,8 @@ private:
     void revokeToken();
     void setFame();
     void resetCounter();
+    void featureChallenge(const QString& list);
+    void unfeatureChallenge();
     void saveGhost();
     void deleteGhosts(const QStringList& ids, const QString& question);
     void deleteGhost();
@@ -108,6 +110,9 @@ private:
     QTableWidget* challengeTable_;
     QTableWidget* challengeTimes_;
     QLabel* challengeTitle_;
+    QPushButton* featureCommunity_;
+    QPushButton* featureEvo_;
+    QPushButton* unfeature_;
     QComboBox* boardFilter_;
 
     QTableWidget* counterTable_;

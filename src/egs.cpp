@@ -5,8 +5,8 @@
 
 #include "auth.h"
 #include "database.h"
-#include "otg.h"
 #include "egs.pb.h"
+#include "otg.h"
 
 #include <google/protobuf/descriptor.pb.h>
 #include <google/protobuf/dynamic_message.h>
@@ -21,6 +21,7 @@
 #include <QMessageAuthenticationCode>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QSet>
 #include <QStringList>
 #include <QUuid>
 
@@ -52,8 +53,6 @@ struct Session {
     qint64 created = 0;
     qint64 lastSeen = 0;
     int requests = 0;
-    // transactionService: the current transaction id (empty = none yet) and the counter new
-    // ids come from. In memory only: after a server restart the game simply asks for a new one.
     QString transaction;
     qint64 transactionCounter = 1000;
 };
@@ -87,7 +86,6 @@ qint32 accountIdFor(const QString& name) {
     return static_cast<qint32>(v & 0x7fffffff) | 1;
 }
 
-// protobuf returns std::string in older releases and std::string_view in newer ones.
 QString qs(std::string_view s) {
     return QString::fromUtf8(s.data(), static_cast<qsizetype>(s.size()));
 }
@@ -99,7 +97,7 @@ struct Context {
     QByteArray sessionKey;    // the session this request was signed with, empty before login
     QByteArray newSessionKey; // set by a handler: sent as X-SessionKey, becomes the signing key
     int status = 200;
-    AuthResult auth; // login endpoints: the shadNet check of the authCode
+    AuthResult auth;         // login endpoints: the shadNet check of the authCode
     QByteArray serviceError; // set by a handler: sent as X-Service-Error
 };
 
@@ -139,8 +137,8 @@ Endpoint endpoint(const char* service, const char* method, bool secure, bool lis
 
 template <class Req, class Resp>
 Endpoint discoveryEndpoint(Endpoint::Discovery group, const char* service, const char* method) {
-    Endpoint e = endpoint<Req, Resp>(service, method, false, true,
-                                     [](Context&, const Req&, Resp&) {});
+    Endpoint e =
+        endpoint<Req, Resp>(service, method, false, true, [](Context&, const Req&, Resp&) {});
     e.discovery = group;
     const char* label = group == Endpoint::Discovery::Clubs ? "club" : "friends";
     e.run = [service, method, label](Context& ctx, const QByteArray& body) {
@@ -152,7 +150,7 @@ Endpoint discoveryEndpoint(Endpoint::Discovery group, const char* service, const
         ctx.status = 503;
         ctx.serviceError = "Service unavailable";
         StatusResult result;
-        result.set_retryhint(300);
+        result.set_retryhint(RETRY_HINT_1);
         return result.SerializeAsString();
     };
     return e;
@@ -161,7 +159,6 @@ Endpoint discoveryEndpoint(Endpoint::Discovery group, const char* service, const
 std::string endpointList();
 
 void login(Context& ctx, const OAuthLoginRequest& req, OAuthLoginResponse& resp) {
-    // A verified login uses shadNet's online id, not the name the client sent.
     const bool verified = ctx.auth.outcome == AuthResult::Outcome::Verified;
     QString name = verified ? ctx.auth.onlineId : qs(req.name());
     if (name.isEmpty()) {
@@ -216,13 +213,14 @@ void minimalProfiles(Context&, const GetMinimalProfilesRequest& req,
         p->set_accountid(id);
         const QString name = egsPlayerName(id);
         p->set_name(name.toStdString());
+        // only when present).
         if (const auto f = db::fame(id)) {
             p->mutable_accountprogression()->set_xp(f->xp);
         }
         names << QStringLiteral("%1=%2").arg(id).arg(name);
     }
-    qCInfo(lcEgs).noquote() << "profiles for" << req.accounts_size() << "accounts:"
-                            << names.join(QStringLiteral(", "));
+    qCInfo(lcEgs).noquote() << "profiles for" << req.accounts_size()
+                            << "accounts:" << names.join(QStringLiteral(", "));
 }
 
 void aggregatedProfiles(Context&, const GetAggregatedProfilesRequest& req,
@@ -242,7 +240,8 @@ void aggregatedProfiles(Context&, const GetAggregatedProfilesRequest& req,
         AccountRef* a = resp.add_profiles()->mutable_account();
         a->set_id(id);
         a->set_name(name.toStdString());
-        found << QStringLiteral("%1=%2%3").arg(name).arg(id).arg(known ? QString() : QStringLiteral(" (new)"));
+        found << QStringLiteral("%1=%2%3").arg(name).arg(id).arg(
+            known ? QString() : QStringLiteral(" (not played yet)"));
     }
     qCInfo(lcEgs).noquote() << "aggregated profiles:" << found.join(QStringLiteral(", "));
 }
@@ -261,7 +260,8 @@ void friends(Context& ctx, const GetFriendsRequest&, GetFriendsResponse& resp) {
         names << p.name;
     }
     qCInfo(lcEgs).noquote() << "friends of" << (me.isEmpty() ? QStringLiteral("?") : me) << "->"
-                            << names.size() << (names.isEmpty() ? QString() : names.join(QStringLiteral(", ")));
+                            << names.size()
+                            << (names.isEmpty() ? QString() : names.join(QStringLiteral(", ")));
 }
 
 // ---- systemService.getTimeInfo, transactionService ----------------------------------------------
@@ -275,31 +275,33 @@ Session* sessionOf(const Context& ctx) {
     return it == sessions().byKey.end() ? nullptr : &*it;
 }
 
-std::function<void(Context&, const TransactionRequest&, TransactionResponse&)>
-transactionCall(const char* method, bool startNew) {
-    return [method, startNew](Context& ctx, const TransactionRequest& req,
-                              TransactionResponse& resp) {
-        QMutexLocker lock(&sessions().mutex);
-        Session* s = sessionOf(ctx);
-        if (!s) {
-            resp.set_currenttransactionid("0");
-            return;
-        }
-        const QString before = s->transaction;
-        if (startNew || s->transaction.isEmpty()) {
-            s->transaction = QString::number(++s->transactionCounter);
-        }
-        resp.set_currenttransactionid(s->transaction.toStdString());
-        qCInfo(lcEgs).noquote() << "transaction" << method << "for" << s->name
-                                << (req.has_currenttransactionid()
-                                        ? QStringLiteral("(completes %1)").arg(qs(req.currenttransactionid()))
-                                        : QString())
-                                << "->" << s->transaction
-                                << (before == s->transaction ? QString() : QStringLiteral("(new)"));
-    };
+std::function<void(Context&, const TransactionRequest&, TransactionResponse&)> transactionCall(
+    const char* method, bool startNew) {
+    return
+        [method, startNew](Context& ctx, const TransactionRequest& req, TransactionResponse& resp) {
+            QMutexLocker lock(&sessions().mutex);
+            Session* s = sessionOf(ctx);
+            if (!s) {
+                resp.set_currenttransactionid("0");
+                return;
+            }
+            const QString before = s->transaction;
+            if (startNew || s->transaction.isEmpty()) {
+                s->transaction = QString::number(++s->transactionCounter);
+            }
+            resp.set_currenttransactionid(s->transaction.toStdString());
+            qCInfo(lcEgs).noquote()
+                << "transaction" << method << "for" << s->name
+                << (req.has_currenttransactionid()
+                        ? QStringLiteral("(completes %1)").arg(qs(req.currenttransactionid()))
+                        : QString())
+                << "->" << s->transaction
+                << (before == s->transaction ? QString() : QStringLiteral("(new)"));
+        };
 }
 
-// ---- profileService: fame -------------------------------------------------------------------------
+// ---- profileService: fame
+// -------------------------------------------------------------------------
 
 qint64 sessionAccount(const Context& ctx, QString* name = nullptr) {
     QMutexLocker lock(&sessions().mutex);
@@ -332,7 +334,8 @@ void getFame(Context& ctx, const Empty&, GetFameResponse& resp) {
 void updateFame(Context& ctx, const UpdateFameRequest& req, UpdateFameResponse& resp) {
     QString name;
     const qint64 account = sessionAccount(ctx, &name);
-    db::Fame f = (account ? db::fame(account) : std::nullopt).value_or(db::Fame{account, 0, {}, {}, 0});
+    db::Fame f =
+        (account ? db::fame(account) : std::nullopt).value_or(db::Fame{account, 0, {}, {}, 0});
     const qint64 sent = req.playertotalclientfame();
     if (account != 0) {
         f.xp = std::max(f.xp, sent);
@@ -355,15 +358,121 @@ void updateFame(Context& ctx, const UpdateFameRequest& req, UpdateFameResponse& 
     after->set_xp(f.xp);
     after->set_serverxp(0);
     resp.mutable_clubprogression()->mutable_after()->set_xp(0);
-    qCInfo(lcEgs).noquote() << "fame update from" << (name.isEmpty() ? QStringLiteral("?") : name)
-                            << "total" << sent << "-> stored" << f.xp
-                            << (req.clubfamedelta() > 0
-                                    ? QStringLiteral("(club delta %1 ignored: no clubs yet)").arg(req.clubfamedelta())
-                                    : QString())
-                            << "transaction" << qs(req.transactionid());
+    qCInfo(lcEgs).noquote()
+        << "fame update from" << (name.isEmpty() ? QStringLiteral("?") : name) << "total" << sent
+        << "-> stored" << f.xp
+        << (req.clubfamedelta() > 0
+                ? QStringLiteral("(club delta %1 ignored: no clubs yet)").arg(req.clubfamedelta())
+                : QString())
+        << "transaction" << qs(req.transactionid());
 }
 
-// ---- storageService: ghosts ----------------------------------------------------------------------
+// ---- objectiveService: accolades
+// -----------------------------------------------------------------
+
+void fillAccolades(AccoladeProgressResponse& resp, qint64 account, const QString& only) {
+    for (const db::Accolade& a : db::accolades(account)) {
+        if (!only.isEmpty() && a.name != only) {
+            continue;
+        }
+        AccoladeProgress* p = resp.add_progresslist();
+        p->set_accoladename(a.name.toStdString());
+        p->set_type(ACCOLADE_TYPE_6);
+        p->set_progress(a.progress);
+    }
+}
+
+void playerAccolades(Context& ctx, const GetAccoladeProgressRequest& req,
+                     AccoladeProgressResponse& resp) {
+    QString name;
+    const qint64 session = sessionAccount(ctx, &name);
+    const qint64 account = req.currentaccount() || !req.has_accountid() ? session : req.accountid();
+    const QString only = qs(req.accoladename());
+    if (account != 0) {
+        fillAccolades(resp, account, only);
+    }
+    qCInfo(lcEgs).noquote() << "accolades of" << egsPlayerName(account) << "for"
+                            << (name.isEmpty() ? QStringLiteral("?") : name)
+                            << (only.isEmpty() ? QString() : QStringLiteral("(%1)").arg(only))
+                            << (req.has_accoladeid()
+                                    ? QStringLiteral("(id %1)").arg(req.accoladeid())
+                                    : QString())
+                            << "->" << resp.progresslist_size()
+                            << (resp.progresslist_size() == 1 ? "entry" : "entries");
+}
+
+void clubAccolades(Context& ctx, const GetClubAccoladeProgressRequest& req,
+                   AccoladeProgressResponse&) {
+    qCInfo(lcEgs).noquote() << "club accolades for" << egsSessionName(ctx.sessionKey) << "-"
+                            << qs(req.ShortDebugString()) << "-> none (clubs not implemented)";
+}
+
+void updateAccolades(Context& ctx, const UpdateAccoladeProgressRequest& req,
+                     AccoladeProgressResponse& resp) {
+    QString name;
+    const qint64 account = sessionAccount(ctx, &name);
+    static QMutex mutex;
+    static QSet<QString> applied;
+    QStringList changes;
+    QStringList skipped;
+    for (const AccoladeProgressUpdate& u : req.updates()) {
+        const QString accolade = qs(u.accoladename());
+        if (accolade.isEmpty()) {
+            continue;
+        }
+        if (u.currentclub()) {
+            skipped << QStringLiteral("%1 %2%3 (club)")
+                           .arg(accolade, u.progress() >= 0 ? "+" : "")
+                           .arg(u.progress());
+            continue;
+        }
+        if (account == 0) {
+            skipped << accolade;
+            continue;
+        }
+        const QString key =
+            QStringLiteral("%1|%2|%3").arg(account).arg(qs(req.transactionid()), accolade);
+        bool fresh = true;
+        {
+            QMutexLocker l(&mutex);
+            if (applied.size() > 20000) {
+                applied.clear();
+            }
+            fresh = req.transactionid().empty() || !applied.contains(key);
+            applied.insert(key);
+        }
+        qint64 total = 0;
+        if (fresh) {
+            total = db::addAccoladeProgress(account, accolade, u.progress());
+            changes << QStringLiteral("%1 %2%3 = %4")
+                           .arg(accolade, u.progress() >= 0 ? "+" : "")
+                           .arg(u.progress())
+                           .arg(total);
+        } else {
+            for (const db::Accolade& a : db::accolades(account)) {
+                if (a.name == accolade) {
+                    total = a.progress;
+                }
+            }
+            skipped << QStringLiteral("%1 (already applied)").arg(accolade);
+        }
+        AccoladeProgress* p = resp.add_progresslist();
+        p->set_accoladename(accolade.toStdString());
+        p->set_type(ACCOLADE_TYPE_6);
+        p->set_progress(total);
+    }
+    qCInfo(lcEgs).noquote() << "accolade update from"
+                            << (name.isEmpty() ? QStringLiteral("?") : name) << "transaction"
+                            << qs(req.transactionid()) << ":"
+                            << (changes.isEmpty() ? QStringLiteral("nothing stored")
+                                                  : changes.join(", "))
+                            << (skipped.isEmpty()
+                                    ? QString()
+                                    : QStringLiteral("| not stored: %1").arg(skipped.join(", ")));
+}
+
+// ---- storageService: ghosts
+// ----------------------------------------------------------------------
 
 QString bobChecksum(const QByteArray& data) {
     return QString::fromLatin1(QCryptographicHash::hash(data, QCryptographicHash::Md5).toBase64());
@@ -375,16 +484,15 @@ void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& res
     const QByteArray data(req.body().data(), static_cast<qsizetype>(req.body().size()));
     if (account == 0) {
         ctx.status = 500;
-        qCWarning(lcEgs).noquote() << "ghost upload without a session refused (" << data.size()
-                                   << "bytes)";
+        qCWarning(lcEgs).noquote()
+            << "ghost upload without a session refused (" << data.size() << "bytes)";
         return;
     }
     const QString sent = qs(req.checksum());
     const QString actual = bobChecksum(data);
     if (!sent.isEmpty() && sent != actual) {
-        // Stored anyway, with the checksum we computed: the game checks downloads against it.
-        qCWarning(lcEgs).noquote() << "ghost from" << name << "has checksum" << sent
-                                   << "but the data gives" << actual;
+        qCWarning(lcEgs).noquote()
+            << "ghost from" << name << "has checksum" << sent << "but the data gives" << actual;
     }
     if (req.has_contentlength() && req.contentlength() != data.size()) {
         qCWarning(lcEgs).noquote() << "ghost from" << name << "says" << req.contentlength()
@@ -411,9 +519,9 @@ void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& res
         }
     }
     if (id == 0) {
-        ctx.status = 500; // the game marks the upload failed (0x41B6E0) and races on
-        qCWarning(lcEgs).noquote() << "ghost from" << name << "not stored (" << data.size()
-                                   << "bytes)";
+        ctx.status = 500;
+        qCWarning(lcEgs).noquote()
+            << "ghost from" << name << "not stored (" << data.size() << "bytes)";
         return;
     }
     const QString url = otgBaseUrl(ctx.request) + QStringLiteral("/ghosts/%1").arg(id);
@@ -444,7 +552,9 @@ void getRemoteUrl(Context& ctx, const GetRemoteUrlRequest& req, GetRemoteUrlResp
                             << url;
 }
 
-// ---- statsService.getAccountStats -----------------------------------------------------------------
+// ---- statsService.getAccountStats
+// -----------------------------------------------------------------
+
 const QString StatsResource = QStringLiteral("stats/V06/player/%1");
 
 struct StatColumn {
@@ -527,7 +637,8 @@ EgsStatsTable statsTable(qint64 accountId, const QString& set) {
         counts = g->counts;
         t.stored = true;
     }
-    const auto fixed = [&](const StatColumn* first, const StatColumn* last, const QString& category) {
+    const auto fixed = [&](const StatColumn* first, const StatColumn* last,
+                           const QString& category) {
         QList<qint64> values;
         for (const StatColumn* c = first; c != last; ++c) {
             t.columns << QString::fromLatin1(c->name);
@@ -538,7 +649,8 @@ EgsStatsTable statsTable(qint64 accountId, const QString& set) {
         t.known = true;
     };
     if (set == QLatin1String("Overdrive")) {
-        fixed(std::begin(OverdriveColumns), std::end(OverdriveColumns), QStringLiteral("overdrive"));
+        fixed(std::begin(OverdriveColumns), std::end(OverdriveColumns),
+              QStringLiteral("overdrive"));
         return t;
     }
     if (set == QLatin1String("FaceOff")) {
@@ -553,7 +665,6 @@ EgsStatsTable statsTable(qint64 accountId, const QString& set) {
         for (const StatColumn& c : RowColumns) {
             t.columns << QString::fromLatin1(c.name);
         }
-        // Every subject with a counter in this category, in key order.
         const QString marker = QLatin1Char('/') + category + QLatin1Char('/');
         QStringList subjects;
         for (auto it = counts.constBegin(); it != counts.constEnd(); ++it) {
@@ -575,7 +686,6 @@ EgsStatsTable statsTable(qint64 accountId, const QString& set) {
 
 void accountStats(Context& ctx, const GetAccountStatsRequest& req, GetAccountStatsResponse& resp) {
     const QString set = qs(req.columndefinitionsetname());
-    // Whose stats: an asked account, else the caller. Clubs are not implemented: no rows.
     const bool club = req.currentclub() || req.clubs_size() > 0;
     const qint64 account = req.accounts_size() > 0 ? req.accounts(0).id() : sessionAccount(ctx);
     EgsStatsTable t = statsTable(club ? 0 : account, set);
@@ -600,14 +710,13 @@ void accountStats(Context& ctx, const GetAccountStatsRequest& req, GetAccountSta
     qCInfo(lcEgs).noquote() << "stats" << set << "for"
                             << (club ? QStringLiteral("a club") : egsPlayerName(account)) << "->"
                             << resp.stats_size() << (resp.stats_size() == 1 ? "row" : "rows")
-                            << (club ? QStringLiteral("(clubs not implemented)")
-                                     : !t.stored ? QStringLiteral("(no stats stored yet)")
-                                                 : QString());
+                            << (club        ? QStringLiteral("(clubs not implemented)")
+                                : !t.stored ? QStringLiteral("(no stats stored yet)")
+                                            : QString());
 }
 
 const QList<Endpoint>& endpoints() {
     static const QList<Endpoint> list = {
-        // Registered by the game itself before it has a schema (0xA29400), so not listed.
         endpoint<Empty, gp::FileDescriptorProto>(
             "indexService", "getMessageDescriptors", false, false,
             [](Context&, const Empty&, gp::FileDescriptorProto& out) {
@@ -635,9 +744,9 @@ const QList<Endpoint>& endpoints() {
         endpoint<GetFriendsRequest, GetFriendsResponse>("friendsListService", "getFriends", false,
                                                         true, friends),
         endpoint<Empty, GetTimeInfoResponse>("systemService", "getTimeInfo", false, true, timeInfo),
-        endpoint<TransactionRequest, TransactionResponse>(
-            "transactionService", "newTransaction", false, true,
-            transactionCall("newTransaction", true)),
+        endpoint<TransactionRequest, TransactionResponse>("transactionService", "newTransaction",
+                                                          false, true,
+                                                          transactionCall("newTransaction", true)),
         endpoint<TransactionRequest, TransactionResponse>(
             "transactionService", "getCurrentTransaction", false, true,
             transactionCall("getCurrentTransaction", false)),
@@ -651,43 +760,56 @@ const QList<Endpoint>& endpoints() {
             "transactionService", "cancelCurrentTransaction", false, true,
             transactionCall("cancelCurrentTransaction", true)),
         endpoint<Empty, GetFameResponse>("profileService", "getFame", false, true, getFame),
-        endpoint<UpdateFameRequest, UpdateFameResponse>(
-            "profileService", "updateFameInTransaction", false, true, updateFame),
+        endpoint<UpdateFameRequest, UpdateFameResponse>("profileService", "updateFameInTransaction",
+                                                        false, true, updateFame),
+        endpoint<FindGlobalObjectivesRequest, FindGlobalObjectivesResponse>(
+            "objectiveService", "findGlobalObjectives", false, true,
+            [](Context& ctx, const FindGlobalObjectivesRequest& req,
+               FindGlobalObjectivesResponse&) {
+                qCInfo(lcEgs).noquote() << "global objectives for" << egsSessionName(ctx.sessionKey)
+                                        << "type" << int(req.type()) << "-> none";
+            }),
+        endpoint<GetAccoladeProgressRequest, AccoladeProgressResponse>(
+            "objectiveService", "getPlayerAccoladeProgress", false, true, playerAccolades),
+        endpoint<GetClubAccoladeProgressRequest, AccoladeProgressResponse>(
+            "objectiveService", "getClubAccoladeProgress", false, true, clubAccolades),
+        endpoint<UpdateAccoladeProgressRequest, AccoladeProgressResponse>(
+            "objectiveService", "updateAccoladeProgressInTransaction", false, true,
+            updateAccolades),
         endpoint<CreateBobRequest, CreateBobResponse>("storageService", "createBob", false, true,
                                                       createBob),
-        endpoint<GetRemoteUrlRequest, GetRemoteUrlResponse>("storageService", "getRemoteUrl",
-                                                            false, true, getRemoteUrl),
+        endpoint<GetRemoteUrlRequest, GetRemoteUrlResponse>("storageService", "getRemoteUrl", false,
+                                                            true, getRemoteUrl),
         endpoint<GetAccountStatsRequest, GetAccountStatsResponse>("statsService", "getAccountStats",
                                                                   false, true, accountStats),
-        // Club discovery mode (off unless config.json egs.club_discovery is true).
-        discoveryEndpoint<ClubCreateRequest, ClubReply>(
-            Endpoint::Discovery::Clubs, "clubService", "createAndJoin"),
-        discoveryEndpoint<ClubNameMessage, ClubNameMessage>(
-            Endpoint::Discovery::Clubs, "clubService", "sanitize"),
-        discoveryEndpoint<QueryClubsRequest, QueryClubsResponse>(
-            Endpoint::Discovery::Clubs, "clubService", "queryClubs"),
-        discoveryEndpoint<ClubQuickSearchRequest, ClubListResponse>(
-            Endpoint::Discovery::Clubs, "clubService", "quickSearch"),
-        discoveryEndpoint<ClubAccountsRequest, ClubReply>(
-            Endpoint::Discovery::Clubs, "clubService", "join"),
-        discoveryEndpoint<ClubIdRequest, ClubReply>(
-            Endpoint::Discovery::Clubs, "clubService", "requestJoin"),
-        discoveryEndpoint<ClubIdRequest, ClubReply>(
-            Endpoint::Discovery::Clubs, "clubService", "leave"),
-        discoveryEndpoint<ClubAccountsRequest, Empty>(
-            Endpoint::Discovery::Clubs, "clubService", "invite"),
+        discoveryEndpoint<ClubCreateRequest, ClubReply>(Endpoint::Discovery::Clubs, "clubService",
+                                                        "createAndJoin"),
+        discoveryEndpoint<ClubNameMessage, ClubNameMessage>(Endpoint::Discovery::Clubs,
+                                                            "clubService", "sanitize"),
+        discoveryEndpoint<QueryClubsRequest, QueryClubsResponse>(Endpoint::Discovery::Clubs,
+                                                                 "clubService", "queryClubs"),
+        discoveryEndpoint<ClubQuickSearchRequest, ClubListResponse>(Endpoint::Discovery::Clubs,
+                                                                    "clubService", "quickSearch"),
+        discoveryEndpoint<ClubAccountsRequest, ClubReply>(Endpoint::Discovery::Clubs, "clubService",
+                                                          "join"),
+        discoveryEndpoint<ClubIdRequest, ClubReply>(Endpoint::Discovery::Clubs, "clubService",
+                                                    "requestJoin"),
+        discoveryEndpoint<ClubIdRequest, ClubReply>(Endpoint::Discovery::Clubs, "clubService",
+                                                    "leave"),
+        discoveryEndpoint<ClubAccountsRequest, Empty>(Endpoint::Discovery::Clubs, "clubService",
+                                                      "invite"),
         discoveryEndpoint<FindClubInvitesRequest, ClubInvitesResponse>(
             Endpoint::Discovery::Clubs, "clubService", "findInvites"),
-        discoveryEndpoint<ClubIdRequest, Empty>(
-            Endpoint::Discovery::Clubs, "clubService", "rejectInvite"),
-        discoveryEndpoint<ClubIdRequest, Empty>(
-            Endpoint::Discovery::Clubs, "clubService", "rejectJoinRequest"),
-        discoveryEndpoint<ClubMembershipRequest, ClubReply>(
-            Endpoint::Discovery::Clubs, "clubService", "updateMembership"),
+        discoveryEndpoint<ClubIdRequest, Empty>(Endpoint::Discovery::Clubs, "clubService",
+                                                "rejectInvite"),
+        discoveryEndpoint<ClubIdRequest, Empty>(Endpoint::Discovery::Clubs, "clubService",
+                                                "rejectJoinRequest"),
+        discoveryEndpoint<ClubMembershipRequest, ClubReply>(Endpoint::Discovery::Clubs,
+                                                            "clubService", "updateMembership"),
         discoveryEndpoint<UpdateCustomizationRequest, UpdateCustomizationResponse>(
             Endpoint::Discovery::Clubs, "clubService", "updateCustomization"),
-        discoveryEndpoint<GetKeywordsRequest, GetKeywordsResponse>(
-            Endpoint::Discovery::Clubs, "keywordService", "getKeywords"),
+        discoveryEndpoint<GetKeywordsRequest, GetKeywordsResponse>(Endpoint::Discovery::Clubs,
+                                                                   "keywordService", "getKeywords"),
         // Friends discovery mode (off unless config.json egs.friends_discovery is true).
         discoveryEndpoint<FriendsChangeRequest, GetFriendsResponse>(
             Endpoint::Discovery::Friends, "friendsListService", "addFriends"),
@@ -845,7 +967,6 @@ void copyMessage24(const gp::DescriptorProto& in, gp::DescriptorProto* out) {
 
 QByteArray egsDescriptor() {
     static const QByteArray d = [] {
-        // Built from the compiled egs.proto, reduced to protobuf 2.4.1 descriptor fields.
         gp::FileDescriptorProto full;
         SvcEndpointDescriptorList::descriptor()->file()->CopyTo(&full);
         gp::FileDescriptorProto file;
@@ -964,8 +1085,6 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
         run(request, AuthResult{});
         return true;
     }
-
-    // Logins: check the NP authorization code with shadNet first.
     OAuthLoginRequest login;
     login.ParseFromArray(request.body.constData(), static_cast<int>(request.body.size()));
     verifyCode(
@@ -975,10 +1094,8 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
                 run(request, auth);
                 return;
             }
-            // Answers >= 500 are decoded as StatusResult; the login error path reads
-            // retryHint. The X-Service-Error texts are the game's own error strings.
             StatusResult result;
-            result.set_retryhint(auth.unavailable ? 30 : 300);
+            result.set_retryhint(RETRY_HINT_1); // enum, see egs.proto
             const std::string out = result.SerializeAsString();
             HttpResponse r = egsAnswer(method, sessionKey, auth.unavailable ? 503 : 500,
                                        QByteArray(out.data(), qsizetype(out.size())));
@@ -1038,8 +1155,11 @@ void egsSetFame(qint64 accountId, qint64 xp) {
     f.xp = std::max<qint64>(0, xp);
     f.updated = QDateTime::currentMSecsSinceEpoch();
     db::putFame(f);
-    db::putScore({QStringLiteral("fame/player"), QString::number(accountId),
-                  (quint64(2) << 60) | quint64(f.xp), {}, f.updated});
+    db::putScore({QStringLiteral("fame/player"),
+                  QString::number(accountId),
+                  (quint64(2) << 60) | quint64(f.xp),
+                  {},
+                  f.updated});
     qCInfo(lcEgs).noquote() << "fame of" << egsPlayerName(accountId) << "set to" << f.xp
                             << "(admin)";
 }
@@ -1049,8 +1169,7 @@ QList<EgsSessionInfo> egsSessions() {
     QList<EgsSessionInfo> out;
     for (const Session& s : sessions().byKey) {
         out.append({QString::fromLatin1(s.key), s.name, s.accountId, s.shadnetAccount,
-                    s.clientVersion, s.psPlus, s.created, s.lastSeen, s.requests,
-                    s.transaction});
+                    s.clientVersion, s.psPlus, s.created, s.lastSeen, s.requests, s.transaction});
     }
     return out;
 }

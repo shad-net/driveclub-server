@@ -132,10 +132,10 @@ QString callerEntrant(const HttpRequest& request) {
     return player ? QString::number(player->accountId) : QString();
 }
 
-// "i_am_special" stands for the caller
 const QString IAmSpecial = QStringLiteral("i_am_special");
 
-// Leaderboards
+// ---- Leaderboards -----------------------------------------------------------------------------
+
 using Entry = db::Score;
 
 QJsonValue scoreJson(quint64 score) {
@@ -239,6 +239,8 @@ HttpResponse readBoard(const HttpRequest& request, const QString& name) {
     return r;
 }
 
+// Challenge lists: POST challenges/{player,club}/<id>/~leaderboard (no "scores/" prefix)
+
 bool isChallengeList(const QString& resource) {
     return resource.startsWith(QLatin1String("challenges/player/")) ||
            resource.startsWith(QLatin1String("challenges/club/"));
@@ -292,7 +294,7 @@ HttpResponse writeBoard(const HttpRequest& request, const QString& name, bool la
     return json(QJsonDocument(QJsonObject{{QStringLiteral("is_success"), true}}));
 }
 
-// Counter gamestates
+// ---- Counter gamestates ------------------------------------------------------------------------
 
 HttpResponse gameStateJson(const db::GameState& g) {
     return json(QJsonDocument(QJsonObject{
@@ -392,7 +394,6 @@ bool handleOtg(const HttpRequest& request, const QString& endpoint,
         return true;
     }
     if (endpoint == QLatin1String("login/driveclub")) {
-        // provider=psn&code=<NpAuth authorization code>, checked with shadNet (auth.cpp).
         const QString code = request.query.queryItemValue(QStringLiteral("code"));
         verifyCode(QStringLiteral("OTG"), code, [request, respond](const AuthResult& auth) {
             if (auth.outcome == AuthResult::Outcome::Denied) {
@@ -417,7 +418,6 @@ bool handleOtg(const HttpRequest& request, const QString& endpoint,
         return true;
     }
 
-    // OTG services
     static const QRegularExpression service(QStringLiteral("^([^/]+)/([^/]+)/(v\\d+)/(.+)$"));
     const auto m = service.match(endpoint);
     if (!m.hasMatch()) {
@@ -498,6 +498,13 @@ QString otgBoardKind(const QString& name) {
     return QStringLiteral("leaderboard");
 }
 
+static QString featuredListOf(const QString& board) {
+    static const QRegularExpression featured(
+        QStringLiteral("^challenges/(community|evo)/(player|club)$"));
+    const auto m = featured.match(board);
+    return m.hasMatch() ? m.captured(1) : QString();
+}
+
 QJsonArray otgChallenges() {
     static const QRegularExpression id(QStringLiteral("^(-?\\d+)h(\\d+)m(\\d+)s(\\d+)$"));
     struct Info {
@@ -507,6 +514,7 @@ QJsonArray otgChallenges() {
         QJsonArray members;
         QJsonArray attachment;
         qint64 updated = 0;
+        QJsonArray featured;
     };
     QMap<QString, Info> byId;
     for (const db::BoardInfo& b : db::boards()) {
@@ -515,6 +523,18 @@ QJsonArray otgChallenges() {
         }
         const QStringList parts = b.name.split('/');
         const QString owner = parts.value(2);
+        const QString featuredList = featuredListOf(b.name);
+        if (!featuredList.isEmpty()) {
+            for (const Entry& e : db::boardScores(b.name)) {
+                Info& info = byId[e.entrant];
+                info.featured.append(QJsonObject{{QStringLiteral("list"), featuredList},
+                                                 {QStringLiteral("ends"), double(e.score >> 8)}});
+                if (info.attachment.isEmpty()) {
+                    info.attachment = e.attachment;
+                }
+            }
+            continue;
+        }
         for (const Entry& e : db::boardScores(b.name)) {
             const auto m = id.match(e.entrant);
             Info& info = byId[e.entrant];
@@ -536,6 +556,9 @@ QJsonArray otgChallenges() {
     }
     QJsonArray out;
     for (auto it = byId.constBegin(); it != byId.constEnd(); ++it) {
+        if (it->scope.isEmpty()) {
+            continue;
+        }
         const QString board = QStringLiteral("challenges/%1/%2").arg(it->scope, it.key());
         const QList<Entry> times = db::boardScores(board);
         QJsonObject o{
@@ -550,6 +573,7 @@ QJsonArray otgChallenges() {
             {QStringLiteral("board"), board},
             {QStringLiteral("entries"), qint64(times.size())},
             {QStringLiteral("updated"), double(it->updated)},
+            {QStringLiteral("featured"), it->featured},
         };
         if (!times.isEmpty()) {
             o.insert(QStringLiteral("best"), QString::number(times.first().score));
@@ -560,6 +584,56 @@ QJsonArray otgChallenges() {
         out.append(o);
     }
     return out;
+}
+
+bool otgFeatureChallenge(const QString& challenge, const QString& list, int extendDays,
+                         QString* error) {
+    if (list != QLatin1String("community") && list != QLatin1String("evo")) {
+        *error = QStringLiteral("list must be community or evo");
+        return false;
+    }
+    std::optional<Entry> source;
+    QString scope;
+    for (const db::BoardInfo& b : db::boards()) {
+        static const QRegularExpression owner(QStringLiteral("^challenges/(player|club)/-?\\d+$"));
+        const auto m = owner.match(b.name);
+        if (!m.hasMatch()) {
+            continue;
+        }
+        const auto e = db::score(b.name, challenge);
+        if (e && (!source || (e->score & 1))) {
+            source = e;
+            scope = m.captured(1);
+        }
+    }
+    if (!source) {
+        *error = QStringLiteral("no such challenge");
+        return false;
+    }
+    const quint64 day = 24ull * 3600 * 1000;
+    const quint64 ends = (source->score >> 8) + quint64(std::max(0, extendDays)) * day;
+    Entry e = *source;
+    e.board = QStringLiteral("challenges/%1/%2").arg(list, scope);
+    e.score = ends << 8; // flags 0
+    e.updated = QDateTime::currentMSecsSinceEpoch();
+    db::putScore(e);
+    qCInfo(lcOtg).noquote() << "challenge" << challenge << "featured on" << e.board
+                            << QStringLiteral("(ends %1 game time)")
+                                   .arg(QDateTime::fromMSecsSinceEpoch(qint64(ends),
+                                                                       QTimeZone::utc())
+                                            .toString(QStringLiteral("yyyy-MM-dd hh:mm:ss")));
+    return true;
+}
+
+bool otgUnfeatureChallenge(const QString& challenge, const QString& list) {
+    bool removed = false;
+    for (const QString& scope : {QStringLiteral("player"), QStringLiteral("club")}) {
+        removed |= db::removeScore(QStringLiteral("challenges/%1/%2").arg(list, scope), challenge);
+    }
+    if (removed) {
+        qCInfo(lcOtg).noquote() << "challenge" << challenge << "no longer featured on" << list;
+    }
+    return removed;
 }
 
 QJsonArray otgBoardList() {

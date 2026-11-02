@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Driveclub Custom Server Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+
 syntax = "proto2";
 
 message Empty {}
@@ -33,7 +34,6 @@ message GetVersionResponse {
 
 // ---- sessionService ----------------------------------------------------------------------
 
-// sessionService.oauthLogin / oauthRefresh, built at 0xA34440..0xA34997.
 message OAuthLoginRequest {
   optional string authCode = 1;             // NpAuth authorization code
   optional string clientVersion = 2;        // e.g. "CV_bM_tP_p128_x3"
@@ -53,11 +53,17 @@ message SessionKey {
 
 message OAuthLoginResponse {
   optional SessionKey sessionkey = 1;
-  optional int32 retryHint = 2;  // read when the login failed (0xA35106)
+  optional int32 retryHint = 2; 
+}
+
+enum RetryHint {
+  RETRY_HINT_0 = 0;
+  RETRY_HINT_1 = 1;
+  RETRY_HINT_2 = 2;
 }
 
 message StatusResult {
-  optional int32 retryHint = 1;
+  optional RetryHint retryHint = 1;
 }
 
 // ---- profileService ----------------------------------------------------------------------
@@ -257,6 +263,7 @@ message GetRemoteUrlResponse {
 }
 
 // ---- statsService.getAccountStats ---------------------------------------------------------------
+
 message GetAccountStatsRequest {
   optional string columnDefinitionSetName = 1;
   optional bool currentAccount = 2;
@@ -285,6 +292,7 @@ message GetAccountStatsResponse {
 }
 
 // ---- clubService (discovery mode) ----------------------------------------------------------------
+
 enum ClubValue {
   CLUB_VALUE_0 = 0;
   CLUB_VALUE_1 = 1;
@@ -502,12 +510,18 @@ message GetKeywordsResponse {
 }
 
 // ---- friendsListService / accountService (discovery mode) ---------------------------------------
+
 message FriendName {
   optional string name = 1;
 }
 
+enum FriendNamesType {
+  FRIEND_NAMES_PSN = 0;
+}
+
 message FriendNames {
   repeated FriendName accounts = 1;
+  optional FriendNamesType type = 2;
 }
 
 message FriendsChangeRequest {
@@ -522,4 +536,67 @@ message AccountQuickSearchRequest {
 
 message AccountListResponse {
   repeated IdRef accounts = 1;
+}
+
+// ---- objectiveService: accolades ----------------------------------------------------------
+
+enum ObjectiveType {
+  OBJECTIVE_TYPE_0 = 0;
+  OBJECTIVE_TYPE_1 = 1;
+  OBJECTIVE_TYPE_2 = 2;
+  OBJECTIVE_TYPE_3 = 3;
+}
+
+message FindGlobalObjectivesRequest {
+  optional ObjectiveType type = 1;
+}
+
+message FindGlobalObjectivesResponse {
+}
+
+message GetAccoladeProgressRequest {
+  optional bool currentAccount = 1;
+  optional int64 accoladeId = 2;
+  optional string accoladeName = 3;
+  optional int64 accountId = 4;
+}
+
+// Builder 0x6359A0, the same with currentClub and clubId.
+message GetClubAccoladeProgressRequest {
+  optional bool currentClub = 1;
+  optional int64 accoladeId = 2;
+  optional string accoladeName = 3;
+  optional int64 clubId = 4;
+}
+
+enum AccoladeType {
+  ACCOLADE_TYPE_0 = 0;
+  ACCOLADE_TYPE_1 = 1;
+  ACCOLADE_TYPE_2 = 2;
+  ACCOLADE_TYPE_3 = 3;
+  ACCOLADE_TYPE_4 = 4;
+  ACCOLADE_TYPE_5 = 5;
+  ACCOLADE_TYPE_6 = 6;
+  ACCOLADE_TYPE_7 = 7;
+}
+
+message AccoladeProgress {
+  optional string accoladeName = 1;
+  optional AccoladeType type = 2;
+  optional int64 progress = 3;
+}
+
+message AccoladeProgressResponse {
+  repeated AccoladeProgress progressList = 1;
+}
+
+message AccoladeProgressUpdate {
+  optional string accoladeName = 1;
+  optional int64 progress = 2;
+  optional bool currentClub = 3;
+}
+
+message UpdateAccoladeProgressRequest {
+  optional string transactionId = 1;
+  repeated AccoladeProgressUpdate updates = 2;
 }

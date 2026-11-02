@@ -16,8 +16,8 @@ constexpr char EgsKey[] = "ca91f51f-a7f5-4b95-814a-5796cfff586c";
 struct EgsConfig {
     QString serverIdentifier = QStringLiteral("dc-community");
     QString version = QStringLiteral("1");
-    bool clubDiscovery = false;    // true = allow club discovery, false = disable it
-    bool friendsDiscovery = false; // true = allow friends discovery, false = disable it
+    bool clubDiscovery = false;
+    bool friendsDiscovery = false;
 };
 
 void setEgsConfig(const EgsConfig& config);
@@ -29,6 +29,8 @@ std::optional<QByteArray> egsFindSessionKey(const QString& method, const QByteAr
 QString egsSessionName(const QByteArray& sessionKey);
 QByteArray egsDescriptor();
 QString egsDescribeBody(const QString& path, bool response, int status, const QByteArray& body);
+
+// Signed-in players, for the admin API.
 struct EgsSessionInfo {
     QString key;
     QString name;
@@ -44,6 +46,7 @@ struct EgsSessionInfo {
 QList<EgsSessionInfo> egsSessions();
 bool egsDropSession(const QString& key);
 void egsRestoreSessions();
+
 struct EgsPlayerInfo {
     qint64 accountId = 0;
     QString name;

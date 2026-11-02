@@ -57,7 +57,6 @@ void AdminService::handle(const HttpRequest& request, HttpServer::Responder resp
         !sameKey(request.headers.value("x-admin-key"), config_.adminKey)) {
         qCWarning(lcAdmin).noquote()
             << request.method << request.path << "from" << request.peer.toString() << "-> 401";
-        // A game pointed at the wrong port: say so, once per address.
         static QSet<QString> warned;
         const bool gamePath = request.path.startsWith(QLatin1String("/egs/")) ||
                               request.path.startsWith(QLatin1String("/titles/")) ||
@@ -162,6 +161,7 @@ HttpResponse AdminService::route(const HttpRequest& request) {
     }
     if (what == QLatin1String("ghosts") && parts.size() == 2) {
         if (m == "GET") {
+            // Which scores carry each ghost: the attachment text holds "ghost:<id>".
             static const QRegularExpression ghostRef(QStringLiteral("(?:^|,)ghost:(\\d+)(?:,|$)"));
             QHash<qint64, QJsonArray> usedOn;
             for (const db::Score& sc : db::scoresWithGhosts()) {
@@ -207,6 +207,28 @@ HttpResponse AdminService::route(const HttpRequest& request) {
     if (what == QLatin1String("challenges") && parts.size() == 2 && m == "GET") {
         return json(200, otgChallenges());
     }
+    if (what == QLatin1String("challenges") && parts.size() == 3 &&
+        parts.at(2) == QLatin1String("feature")) {
+        if (m == "POST") {
+            const QJsonObject o = QJsonDocument::fromJson(request.body).object();
+            QString why;
+            if (!otgFeatureChallenge(o.value(QStringLiteral("id")).toString(),
+                                     o.value(QStringLiteral("list")).toString(),
+                                     o.value(QStringLiteral("extend_days")).toInt(), &why)) {
+                return error(why == QLatin1String("no such challenge") ? 404 : 400, why);
+            }
+            return json(200, QJsonObject{{QStringLiteral("featured"),
+                                          o.value(QStringLiteral("id")).toString()}});
+        }
+        if (m == "DELETE") {
+            const QString id = request.query.queryItemValue(QStringLiteral("id"));
+            const QString list = request.query.queryItemValue(QStringLiteral("list"));
+            if (!otgUnfeatureChallenge(id, list)) {
+                return error(404, QStringLiteral("not featured"));
+            }
+            return json(200, QJsonObject{{QStringLiteral("unfeatured"), id}});
+        }
+    }
     if (what == QLatin1String("gamestates") && parts.size() == 2) {
         if (m == "GET") {
             return json(200, otgGameStates());
@@ -237,10 +259,25 @@ HttpResponse AdminService::route(const HttpRequest& request) {
                                    {QStringLiteral("version"), g.version},
                                    {QStringLiteral("updated"), double(g.updated)}});
         }
+        for (const qint64 account : db::accoladeAccounts()) {
+            bool listed = false;
+            for (const QJsonValue& v : out) {
+                listed |= v.toObject().value(QStringLiteral("account_id")).toString() ==
+                          QString::number(account);
+            }
+            if (!listed) {
+                out.append(QJsonObject{{QStringLiteral("account_id"), QString::number(account)},
+                                       {QStringLiteral("name"), egsPlayerName(account)},
+                                       {QStringLiteral("counters"), 0},
+                                       {QStringLiteral("version"), 0},
+                                       {QStringLiteral("updated"), 0.0}});
+            }
+        }
         QJsonArray sets;
         for (const QString& s : egsStatSets()) {
             sets.append(s);
         }
+        sets.append(QStringLiteral("Accolades"));
         return json(200,
                     QJsonObject{{QStringLiteral("players"), out}, {QStringLiteral("sets"), sets}});
     }
@@ -248,6 +285,18 @@ HttpResponse AdminService::route(const HttpRequest& request) {
         m == "GET") {
         const qint64 account = request.query.queryItemValue(QStringLiteral("account")).toLongLong();
         const QString set = request.query.queryItemValue(QStringLiteral("set"));
+        if (set == QLatin1String("Accolades")) {
+            QJsonArray rows;
+            const QList<db::Accolade> list = db::accolades(account);
+            for (const db::Accolade& a : list) {
+                rows.append(QJsonObject{{QStringLiteral("name"), a.name},
+                                        {QStringLiteral("values"), QJsonArray{a.progress}}});
+            }
+            return json(200, QJsonObject{{QStringLiteral("columns"),
+                                          QJsonArray{QStringLiteral("Progress")}},
+                                         {QStringLiteral("rows"), rows},
+                                         {QStringLiteral("stored"), !list.isEmpty()}});
+        }
         const EgsStatsTable t = egsStats(account, set);
         if (!t.known) {
             return error(404, QStringLiteral("unknown stats set"));
@@ -290,6 +339,7 @@ HttpResponse AdminService::route(const HttpRequest& request) {
     }
     if (what == QLatin1String("players") && parts.size() == 3 &&
         parts[2] == QLatin1String("fame") && (m == "POST" || m == "PUT")) {
+        // {"account_id": "1839021443", "xp": 10619}: sets the fame exactly (may lower it).
         const QJsonObject o = QJsonDocument::fromJson(request.body).object();
         const qint64 account = o.value(QStringLiteral("account_id")).toVariant().toLongLong();
         const QJsonValue xpValue = o.value(QStringLiteral("xp"));
@@ -307,6 +357,7 @@ HttpResponse AdminService::route(const HttpRequest& request) {
     return error(404, QStringLiteral("not found"));
 }
 
+// POST /api/leaderboards/entries?board=<name>
 HttpResponse AdminService::setEntry(const QString& board, const QByteArray& body) {
     QJsonParseError parseError{};
     const QJsonDocument doc = QJsonDocument::fromJson(body, &parseError);

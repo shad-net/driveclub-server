@@ -67,7 +67,6 @@ int main(int argc, char* argv[]) {
     }
     QByteArray configJson = file.readAll();
     file.close();
-    // Settings added in newer versions are written into an existing config.json.
     QStringList added;
     if (const auto merged = mergeDefaultConfig(configJson, &added)) {
         QSaveFile out(configPath);
@@ -127,6 +126,14 @@ int main(int argc, char* argv[]) {
     }
     qInfo("EGS serverIdentifier \"%s\" (each OTG_Service_* TSS value must contain it)",
           qPrintable(config->egs.serverIdentifier));
+    if (config->egs.friendsDiscovery) {
+        qWarning("friends discovery mode is on (egs.friends_discovery): addFriends, removeFriends "
+                 "and accountService.quickSearch are listed, logged and answered 503");
+    }
+    if (config->egs.clubDiscovery) {
+        qWarning("club discovery mode is on (egs.club_discovery): club requests are listed, logged "
+                 "and answered 503");
+    }
 
     const QString basePath = config->basePath;
     HttpServer server([basePath](const HttpRequest& request, HttpServer::Responder reply) {

@@ -42,6 +42,9 @@ void otgRestoreTokens();
 QString otgBoardKind(const QString& name);
 QJsonArray otgBoardList();
 QJsonArray otgChallenges();
+bool otgFeatureChallenge(const QString& challenge, const QString& list, int extendDays,
+                         QString* error);
+bool otgUnfeatureChallenge(const QString& challenge, const QString& list);
 std::optional<QJsonArray> otgBoardEntries(const QString& name);
 bool otgRemoveEntry(const QString& board, const QString& entrant);
 bool otgClearBoard(const QString& board);
@@ -49,7 +52,6 @@ QJsonArray otgGameStates();
 bool otgRemoveGameState(const QString& resource);
 bool otgSetEntry(const QString& board, const QString& entrant, quint64 score,
                  const QJsonArray& attachment);
-
 constexpr quint64 OtgTimeMask = 0x0FFFFFFFFFFFFFFFull;
 constexpr quint64 otgTimeScore(quint64 ms) {
     return ms > OtgTimeMask ? 0 : OtgTimeMask - ms;

@@ -42,6 +42,7 @@ namespace {
 
 constexpr int MaxTrafficRows = 2000;
 
+// ms since epoch -> local time
 QString when(double ms) {
     if (ms <= 0) {
         return QStringLiteral("-");
@@ -343,8 +344,28 @@ QWidget* MainWindow::buildChallengesTab() {
         tr("<b>Challenges</b>: each one is on its creator's list and on every challenged player's "
            "list; the times set on it are on its own board. End times are in the game's clock.")));
     challengeTable_ = makeTable({tr("Challenge"), tr("Creator"), tr("Challenged"), tr("Ends"),
-                                 tr("Times"), tr("Best"), tr("Details")});
+                                 tr("Times"), tr("Best"), tr("Featured"), tr("Details")});
     layout->addWidget(challengeTable_, 3);
+    featureCommunity_ = new QPushButton(tr("Feature in Community"));
+    featureCommunity_->setToolTip(tr("Copy the challenge to challenges/community: every player "
+                                     "sees it among the Community challenges."));
+    featureEvo_ = new QPushButton(tr("Feature as Evo challenge"));
+    featureEvo_->setToolTip(tr("Copy the challenge to challenges/evo: every player sees it "
+                               "among the Evo (official) challenges."));
+    unfeature_ = new QPushButton(tr("Unfeature"));
+    unfeature_->setToolTip(tr("Remove the challenge from the Community and Evo lists."));
+    auto* featureButtons = new QHBoxLayout;
+    featureButtons->addStretch();
+    featureButtons->addWidget(featureCommunity_);
+    featureButtons->addWidget(featureEvo_);
+    featureButtons->addWidget(unfeature_);
+    layout->addLayout(featureButtons);
+    connect(featureCommunity_, &QPushButton::clicked, this,
+            [this] { featureChallenge(QStringLiteral("community")); });
+    connect(featureEvo_, &QPushButton::clicked, this,
+            [this] { featureChallenge(QStringLiteral("evo")); });
+    connect(unfeature_, &QPushButton::clicked, this, &MainWindow::unfeatureChallenge);
+    connect(challengeTable_, &QTableWidget::itemSelectionChanged, this, &MainWindow::updateButtons);
     challengeTitle_ = new QLabel(tr("Select a challenge to see its times"));
     layout->addWidget(challengeTitle_);
     challengeTimes_ = makeTable(
@@ -434,7 +455,8 @@ QWidget* MainWindow::buildStatsTab() {
     statsSet_ = new QComboBox;
     statsSet_->addItems({QStringLiteral("Tracks"), QStringLiteral("Vehicles"),
                          QStringLiteral("GameModes"), QStringLiteral("Challenges"),
-                         QStringLiteral("Overdrive"), QStringLiteral("FaceOff")});
+                         QStringLiteral("Overdrive"), QStringLiteral("FaceOff"),
+                         QStringLiteral("Accolades")});
     bar->addWidget(statsSet_);
     statsTitle_ = new QLabel(tr("Select a player"));
     bar->addWidget(statsTitle_, 1);
@@ -782,9 +804,14 @@ void MainWindow::showChallenges(const QJsonArray& challenges) {
         for (const QJsonValue& v : c.value("attachment").toArray()) {
             details << v.toString();
         }
+        QStringList featured;
+        for (const QJsonValue& f : c.value("featured").toArray()) {
+            featured << f.toObject().value("list").toString();
+        }
+        challengeTable_->setItem(i, 6, cell(featured.join(QStringLiteral(", "))));
         auto* detailCell = cell(details.join(QStringLiteral(", ")));
         detailCell->setToolTip(details.join('\n'));
-        challengeTable_->setItem(i, 6, detailCell);
+        challengeTable_->setItem(i, 7, detailCell);
         if (c.value("id").toString() == selectedId) {
             reselect = i;
         }
@@ -798,6 +825,7 @@ void MainWindow::showChallenges(const QJsonArray& challenges) {
     }
     challengeTable_->blockSignals(false);
     loadChallengeTimes();
+    updateButtons();
 }
 
 void MainWindow::loadChallengeTimes() {
@@ -1048,6 +1076,11 @@ void MainWindow::showStatsPlayers(const QJsonObject& stats) {
     const int old = selectedIndex(statsPlayerTable_);
     const QString selected =
         old < 0 ? QString() : statsPlayers_.at(old).toObject().value("account_id").toString();
+    for (const QJsonValue& v : stats.value("sets").toArray()) {
+        if (statsSet_->findText(v.toString()) < 0) {
+            statsSet_->addItem(v.toString());
+        }
+    }
     const QJsonArray players = stats.value("players").toArray();
     const bool changed = players != statsPlayers_;
     statsPlayers_ = players;
@@ -1108,7 +1141,6 @@ void MainWindow::loadStatsTable() {
             statsView_->setSortingEnabled(false);
             statsView_->clear();
             if (set == QLatin1String("Overdrive") || set == QLatin1String("FaceOff")) {
-                // One row of many columns: shown turned on its side, a stat per line.
                 const QJsonArray values = rows.isEmpty()
                                               ? QJsonArray()
                                               : rows.first().toObject().value("values").toArray();
@@ -1244,6 +1276,7 @@ void MainWindow::showEntries(const QJsonArray& entries) {
         rank->setData(Qt::UserRole, i);
         entryTable_->setItem(i, 0, rank);
         entryTable_->setItem(i, 1, cell(e.value("entrant").toString()));
+        // Scores are 64-bit; keep the exact text but sort numerically.
         const quint64 score = e.value("score").toString().toULongLong();
         entryTable_->setItem(i, 2, scoreCell(score));
         entryTable_->setItem(i, 3, cell(scoreValue(score)));
@@ -1373,6 +1406,54 @@ void MainWindow::resetCounter() {
                 });
 }
 
+void MainWindow::featureChallenge(const QString& list) {
+    const int i = selectedIndex(challengeTable_);
+    if (i < 0) {
+        return;
+    }
+    const QString id = challenges_.at(i).toObject().value("id").toString();
+    bool ok = false;
+    const int days = QInputDialog::getInt(
+        this,
+        list == QLatin1String("evo") ? tr("Feature as Evo challenge") : tr("Feature in Community"),
+        tr("Feature %1 for every player.\nExtend its end time by (days, 0 = keep):").arg(id), 0, 0,
+        3650, 1, &ok);
+    if (!ok) {
+        return;
+    }
+    const QJsonObject body{{"id", id}, {"list", list}, {"extend_days", days}};
+    api_.post(QStringLiteral("/api/challenges/feature"), QJsonDocument(body),
+              [this, id, list](const ApiClient::Reply& r) {
+                  if (!r.ok()) {
+                      reportError(tr("Feature challenge"), r);
+                      return;
+                  }
+                  setStatus(tr("%1 featured on %2").arg(id, list));
+                  refresh();
+              });
+}
+
+void MainWindow::unfeatureChallenge() {
+    const int i = selectedIndex(challengeTable_);
+    if (i < 0) {
+        return;
+    }
+    const QJsonObject c = challenges_.at(i).toObject();
+    const QString id = c.value("id").toString();
+    for (const QJsonValue& f : c.value("featured").toArray()) {
+        const QString list = f.toObject().value("list").toString();
+        api_.remove(QStringLiteral("/api/challenges/feature?id=%1&list=%2").arg(enc(id), enc(list)),
+                    [this, id](const ApiClient::Reply& r) {
+                        if (!r.ok()) {
+                            reportError(tr("Unfeature challenge"), r);
+                            return;
+                        }
+                        setStatus(tr("%1 unfeatured").arg(id));
+                        refresh();
+                    });
+    }
+}
+
 void MainWindow::revokeToken() {
     const int i = selectedIndex(tokenTable_);
     if (i < 0) {
@@ -1485,6 +1566,7 @@ void MainWindow::addEntries() {
         if (isTime) {
             body.insert(QStringLiteral("time_ms"), best + i * step);
         } else if (kind->currentIndex() == 2) {
+            // Kind 1, as the game posts drift scores: (1 << 60) | points.
             const quint64 points = quint64(std::max<qint64>(0, best - i * step));
             body.insert(QStringLiteral("score"), QString::number((quint64(1) << 60) | points));
         } else {
@@ -1559,6 +1641,12 @@ void MainWindow::updateButtons() {
     addEntry_->setEnabled(connected_);
     setFame_->setEnabled(connected_ && selectedIndex(playerTable_) >= 0);
     resetCounter_->setEnabled(connected_ && selectedIndex(counterTable_) >= 0);
+    const int challenge = selectedIndex(challengeTable_);
+    featureCommunity_->setEnabled(connected_ && challenge >= 0);
+    featureEvo_->setEnabled(connected_ && challenge >= 0);
+    unfeature_->setEnabled(
+        connected_ && challenge >= 0 &&
+        !challenges_.at(challenge).toObject().value("featured").toArray().isEmpty());
     saveGhost_->setEnabled(connected_ && selectedIndex(ghostTable_) >= 0);
     deleteGhost_->setEnabled(connected_ && selectedIndex(ghostTable_) >= 0);
     deleteUnused_->setEnabled(connected_ && !ghosts_.isEmpty());

@@ -98,6 +98,16 @@ const char* const Migrations[] = {
     );
     CREATE INDEX ghosts_owner ON ghosts (account_id);
     )",
+    // 5: accolade progress (objectiveService), the sum of the deltas the game sends per accolade
+    R"(
+    CREATE TABLE accolades (
+        account_id INTEGER NOT NULL,
+        name       TEXT NOT NULL,
+        progress   INTEGER NOT NULL DEFAULT 0,
+        updated    INTEGER NOT NULL,
+        PRIMARY KEY (account_id, name)
+    );
+    )",
 };
 
 QMutex& lock() {
@@ -169,7 +179,6 @@ Player playerFrom(const QSqlQuery& q) {
 constexpr char PlayerColumns[] =
     "account_id, name, logged_in, shadnet_account, first_seen, last_seen";
 constexpr char ScoreColumns[] = "board, entrant, score, attachment, updated";
-
 QString text(const QString& s) {
     return s.isNull() ? QStringLiteral("") : s;
 }
@@ -249,7 +258,7 @@ void prune(int maxAgeDays) {
     }
 }
 
-// Players
+// ---- Players ----------------------------------------------------------------------------------
 
 void putPlayer(const Player& p) {
     const qint64 t = now();
@@ -312,7 +321,7 @@ QList<Player> players() {
     return out;
 }
 
-// Leaderboards
+// ---- Leaderboards -----------------------------------------------------------------------------
 
 QList<Score> boardScores(const QString& board) {
     QList<Score> out;
@@ -334,7 +343,6 @@ QList<Score> scoresWithGhosts() {
     QList<Score> out;
     QMutexLocker l(&lock());
     QSqlQuery q(connection());
-    // "ghost:-1" is the game's "no ghost"; the caller parses the id.
     q.prepare(QStringLiteral("SELECT %1 FROM scores WHERE attachment LIKE '%ghost:%' "
                              "AND attachment NOT LIKE '%ghost:-%'")
                   .arg(QLatin1String(ScoreColumns)));
@@ -412,7 +420,7 @@ QList<BoardInfo> boards() {
     return out;
 }
 
-// EGS sessions
+// ---- EGS sessions -----------------------------------------------------------------------------
 
 void putSession(const Session& s) {
     QMutexLocker l(&lock());
@@ -474,7 +482,7 @@ QList<Session> sessions() {
     return out;
 }
 
-// OTG tokens
+// ---- OTG tokens -------------------------------------------------------------------------------
 
 void putToken(const Token& t) {
     QMutexLocker l(&lock());
@@ -523,7 +531,7 @@ QList<Token> tokens() {
     return out;
 }
 
-// OTG counter gamestates
+// ---- OTG counter gamestates -------------------------------------------------------------------
 
 std::optional<GameState> gameState(const QString& resource) {
     QMutexLocker l(&lock());
@@ -581,7 +589,7 @@ QList<GameState> gameStates() {
     return out;
 }
 
-// Fame
+// ---- Fame -------------------------------------------------------------------------------------
 
 std::optional<Fame> fame(qint64 accountId) {
     QMutexLocker l(&lock());
@@ -618,7 +626,65 @@ bool putFame(const Fame& f) {
     return run(q, "save fame");
 }
 
-// Ghosts
+// ---- Accolades --------------------------------------------------------------------------------
+
+QList<Accolade> accolades(qint64 accountId) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT account_id, name, progress, updated FROM accolades "
+                             "WHERE account_id = ? ORDER BY name"));
+    q.addBindValue(accountId);
+    QList<Accolade> out;
+    if (run(q, "read accolades")) {
+        while (q.next()) {
+            out.append({q.value(0).toLongLong(), q.value(1).toString(), q.value(2).toLongLong(),
+                        q.value(3).toLongLong()});
+        }
+    }
+    return out;
+}
+
+qint64 addAccoladeProgress(qint64 accountId, const QString& name, qint64 delta) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral(
+        "INSERT INTO accolades (account_id, name, progress, updated) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (account_id, name) DO UPDATE SET progress = progress + excluded.progress, "
+        "updated = excluded.updated"));
+    q.addBindValue(accountId);
+    q.addBindValue(text(name));
+    q.addBindValue(delta);
+    q.addBindValue(now());
+    run(q, "save accolade");
+    QSqlQuery r(connection());
+    r.prepare(QStringLiteral("SELECT progress FROM accolades WHERE account_id = ? AND name = ?"));
+    r.addBindValue(accountId);
+    r.addBindValue(text(name));
+    return run(r, "read accolade") && r.next() ? r.value(0).toLongLong() : 0;
+}
+
+QList<qint64> accoladeAccounts() {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT DISTINCT account_id FROM accolades ORDER BY account_id"));
+    QList<qint64> out;
+    if (run(q, "list accolade accounts")) {
+        while (q.next()) {
+            out.append(q.value(0).toLongLong());
+        }
+    }
+    return out;
+}
+
+bool removeAccolades(qint64 accountId) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("DELETE FROM accolades WHERE account_id = ?"));
+    q.addBindValue(accountId);
+    return run(q, "remove accolades") && q.numRowsAffected() > 0;
+}
+
+// ---- Ghosts -----------------------------------------------------------------------------------
 
 qint64 putGhost(const Ghost& g, const QByteArray& data) {
     QMutexLocker l(&lock());
