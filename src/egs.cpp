@@ -421,7 +421,7 @@ void updateAccolades(Context& ctx, const UpdateAccoladeProgressRequest& req,
             continue;
         }
         if (u.currentclub()) {
-            skipped << QStringLiteral("%1 %2%3 (club)")
+            skipped << QStringLiteral("%1 %2%3 (club contribution, no clubs yet)")
                            .arg(accolade, u.progress() >= 0 ? "+" : "")
                            .arg(u.progress());
             continue;
@@ -431,7 +431,8 @@ void updateAccolades(Context& ctx, const UpdateAccoladeProgressRequest& req,
             continue;
         }
         const QString key =
-            QStringLiteral("%1|%2|%3").arg(account).arg(qs(req.transactionid()), accolade);
+            QStringLiteral("%1|%2|%3")
+                .arg(QString::fromLatin1(ctx.sessionKey), qs(req.transactionid()), accolade);
         bool fresh = true;
         {
             QMutexLocker l(&mutex);

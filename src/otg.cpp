@@ -287,8 +287,9 @@ HttpResponse writeBoard(const HttpRequest& request, const QString& name, bool la
         } else {
             qCInfo(lcOtg).noquote()
                 << "score" << name << "entrant" << e.entrant << "score" << e.score
-                << (better ? QStringLiteral("(stored)")
-                           : QStringLiteral("(kept better %1)").arg(old->score));
+                << (better                  ? QStringLiteral("(stored)")
+                    : old->score == e.score ? QStringLiteral("(same as stored)")
+                                            : QStringLiteral("(kept better %1)").arg(old->score));
         }
     }
     return json(QJsonDocument(QJsonObject{{QStringLiteral("is_success"), true}}));
