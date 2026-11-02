@@ -129,6 +129,7 @@ bool removeAccolades(qint64 accountId);
 QStringList friendNames(qint64 accountId);
 bool addFriend(qint64 accountId, const QString& name);    // false when already there
 bool removeFriend(qint64 accountId, const QString& name); // false when not there
+QStringList allFriendNames();
 bool hasFriendList(qint64 accountId);
 
 // ---- Ghosts -----------------------------------------------------------------------------------

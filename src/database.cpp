@@ -730,6 +730,19 @@ bool removeFriend(qint64 accountId, const QString& name) {
     return run(q, "remove friend") && q.numRowsAffected() > 0;
 }
 
+QStringList allFriendNames() {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT DISTINCT name FROM friends"));
+    QStringList out;
+    if (run(q, "list friend names")) {
+        while (q.next()) {
+            out.append(q.value(0).toString());
+        }
+    }
+    return out;
+}
+
 bool hasFriendList(qint64 accountId) {
     QMutexLocker l(&lock());
     QSqlQuery q(connection());

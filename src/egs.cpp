@@ -1233,6 +1233,12 @@ QString egsPlayerName(qint64 accountId) {
     if (const auto p = db::player(accountId)) {
         return p->name;
     }
+    // A PSN friend who has not played here yet
+    for (const QString& name : db::allFriendNames()) {
+        if (accountIdFor(name) == accountId) {
+            return name;
+        }
+    }
     return QStringLiteral("Driver %1").arg(accountId);
 }
 
