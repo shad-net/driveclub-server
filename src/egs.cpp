@@ -87,6 +87,7 @@ qint32 accountIdFor(const QString& name) {
     return static_cast<qint32>(v & 0x7fffffff) | 1;
 }
 
+// protobuf returns std::string in older releases and std::string_view in newer ones.
 QString qs(std::string_view s) {
     return QString::fromUtf8(s.data(), static_cast<qsizetype>(s.size()));
 }
@@ -165,6 +166,7 @@ Endpoint discoveryEndpoint(Endpoint::Discovery group, const char* service, const
 std::string endpointList();
 
 void login(Context& ctx, const OAuthLoginRequest& req, OAuthLoginResponse& resp) {
+    // A verified login uses shadNet's online id, not the name the client sent.
     const bool verified = ctx.auth.outcome == AuthResult::Outcome::Verified;
     QString name = verified ? ctx.auth.onlineId : qs(req.name());
     if (name.isEmpty()) {
@@ -228,8 +230,13 @@ void minimalProfiles(Context&, const GetMinimalProfilesRequest& req,
                             << "accounts:" << names.join(QStringLiteral(", "));
 }
 
-void aggregatedProfiles(Context&, const GetAggregatedProfilesRequest& req,
+qint64 sessionAccount(const Context& ctx, QString* name = nullptr);
+
+void aggregatedProfiles(Context& ctx, const GetAggregatedProfilesRequest& req,
                         GetAggregatedProfilesResponse& resp) {
+    QString me;
+    const qint64 account = config().friendLists ? sessionAccount(ctx, &me) : 0;
+    QStringList added;
     QStringList found;
     for (const std::string& wanted : req.accountnames()) {
         const QString name = qs(wanted).trimmed();
@@ -247,11 +254,18 @@ void aggregatedProfiles(Context&, const GetAggregatedProfilesRequest& req,
         a->set_name(name.toStdString());
         found << QStringLiteral("%1=%2%3").arg(name).arg(id).arg(
             known ? QString() : QStringLiteral(" (not played yet)"));
+        if (account != 0 && name.compare(me, Qt::CaseInsensitive) != 0 &&
+            db::addFriend(account, name)) {
+            added << name;
+        }
     }
     qCInfo(lcEgs).noquote() << "aggregated profiles:" << found.join(QStringLiteral(", "));
+    if (!added.isEmpty()) {
+        qCInfo(lcEgs).noquote() << "friends added for" << me
+                                << "from the PSN friend list:" << added.join(QStringLiteral(", "))
+                                << "->" << db::friendNames(account).size() << "friends";
+    }
 }
-
-qint64 sessionAccount(const Context& ctx, QString* name = nullptr);
 
 qint64 friendAccountId(const QString& name) {
     const auto known = db::playerByName(name);
@@ -361,6 +375,7 @@ void timeInfo(Context&, const Empty&, GetTimeInfoResponse& resp) {
     resp.set_timestamp(QDateTime::currentMSecsSinceEpoch());
 }
 
+// The session a request was signed with, or nullptr (call with sessions().mutex held).
 Session* sessionOf(const Context& ctx) {
     auto it = sessions().byKey.find(ctx.sessionKey);
     return it == sessions().byKey.end() ? nullptr : &*it;
@@ -459,6 +474,7 @@ void updateFame(Context& ctx, const UpdateFameRequest& req, UpdateFameResponse& 
 }
 
 // ---- objectiveService: accolades
+// -----------------------------------------------------------------
 
 void fillAccolades(AccoladeProgressResponse& resp, qint64 account, const QString& only) {
     for (const db::Accolade& a : db::accolades(account)) {
@@ -563,6 +579,7 @@ void updateAccolades(Context& ctx, const UpdateAccoladeProgressRequest& req,
 }
 
 // ---- storageService: ghosts
+// ----------------------------------------------------------------------
 
 QString bobChecksum(const QByteArray& data) {
     return QString::fromLatin1(QCryptographicHash::hash(data, QCryptographicHash::Md5).toBase64());
@@ -573,8 +590,6 @@ void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& res
     const qint64 account = sessionAccount(ctx, &name);
     const QByteArray data(req.body().data(), static_cast<qsizetype>(req.body().size()));
     if (account == 0) {
-        // Signed with no current session (an old key after a re-login, or not a game at all):
-        // a ghost needs an owner, so refuse it like a failed upload.
         ctx.status = 500;
         qCWarning(lcEgs).noquote()
             << "ghost upload without a session refused (" << data.size() << "bytes)";
@@ -594,8 +609,6 @@ void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& res
     g.accountId = account;
     g.mimeType = qs(req.mimetype());
     g.checksum = actual;
-    // After a login the game may upload a ghost it already sent (seen 28 Oct: same checksum, new
-    // id, used by no score). Hand back the stored copy instead of keeping the same data twice.
     qint64 id = 0;
     bool reused = false;
     if (!data.isEmpty()) {
@@ -647,6 +660,7 @@ void getRemoteUrl(Context& ctx, const GetRemoteUrlRequest& req, GetRemoteUrlResp
 }
 
 // ---- statsService.getAccountStats
+// -----------------------------------------------------------------
 
 const QString StatsResource = QStringLiteral("stats/V06/player/%1");
 
@@ -656,7 +670,6 @@ struct StatColumn {
     const char* counter;
 };
 
-// Per-subject sets: the category their subjects come from; all have the same six columns.
 const QList<QPair<QString, QString>>& rowSets() {
     static const QList<QPair<QString, QString>> sets = {
         {QStringLiteral("Tracks"), QStringLiteral("track")},
@@ -758,7 +771,6 @@ EgsStatsTable statsTable(qint64 accountId, const QString& set) {
         for (const StatColumn& c : RowColumns) {
             t.columns << QString::fromLatin1(c.name);
         }
-        // Every subject with a counter in this category, in key order.
         const QString marker = QLatin1Char('/') + category + QLatin1Char('/');
         QStringList subjects;
         for (auto it = counts.constBegin(); it != counts.constEnd(); ++it) {
@@ -811,7 +823,6 @@ void accountStats(Context& ctx, const GetAccountStatsRequest& req, GetAccountSta
 
 const QList<Endpoint>& endpoints() {
     static const QList<Endpoint> list = {
-        // Registered by the game itself before it has a schema (0xA29400), so not listed.
         endpoint<Empty, gp::FileDescriptorProto>(
             "indexService", "getMessageDescriptors", false, false,
             [](Context&, const Empty&, gp::FileDescriptorProto& out) {
@@ -906,7 +917,6 @@ const QList<Endpoint>& endpoints() {
             Endpoint::Discovery::Clubs, "clubService", "updateCustomization"),
         discoveryEndpoint<GetKeywordsRequest, GetKeywordsResponse>(Endpoint::Discovery::Clubs,
                                                                    "keywordService", "getKeywords"),
-        // Real friend lists (config.json egs.friend_lists, on by default).
         withGroup(endpoint<FriendsChangeRequest, GetFriendsResponse>(
                       "friendsListService", "addFriends", false, true, addFriends),
                   Endpoint::Discovery::FriendLists),
@@ -1136,6 +1146,7 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
     }
     const QString service = parts.value(0);
     const QString method = parts.value(1);
+
     const auto found =
         egsFindSessionKey(method, request.body, request.headers.value("x-request-signature"));
     const QByteArray sessionKey = found.value_or(QByteArray());
