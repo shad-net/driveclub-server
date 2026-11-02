@@ -138,8 +138,8 @@ struct Ghost {
 };
 qint64 putGhost(const Ghost& ghost, const QByteArray& data);
 std::optional<qint64> findGhost(qint64 accountId, const QString& mimeType, const QString& checksum,
-                                qint64 size) std::optional<Ghost> ghost(qint64 id,
-                                                                        QByteArray* data = nullptr);
+                                qint64 size);
+std::optional<Ghost> ghost(qint64 id, QByteArray* data = nullptr);
 void countGhostDownload(qint64 id);
 bool removeGhost(qint64 id);
 QList<Ghost> ghosts();
