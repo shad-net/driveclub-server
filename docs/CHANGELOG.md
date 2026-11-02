@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.6
+
+- FriendNames`gains`optional FriendNamesType type = 2 (should fix friends discovery crash)
+- StatusResult.retryHint is an enum (should fix clubs discover crash on creating a club)
+- Added featured challenges
+- Initial accolades support
+
 ## 0.0.5
 
 - Fixed: `i_am_special` on challenge boards
