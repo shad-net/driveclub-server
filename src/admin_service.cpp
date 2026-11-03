@@ -5,6 +5,8 @@
 
 #include "auth.h"
 #include "database.h"
+
+#include <QDateTime>
 #include "egs.h"
 #include "otg.h"
 #include "request_log.h"
@@ -161,7 +163,6 @@ HttpResponse AdminService::route(const HttpRequest& request) {
     }
     if (what == QLatin1String("ghosts") && parts.size() == 2) {
         if (m == "GET") {
-            // Which scores carry each ghost: the attachment text holds "ghost:<id>".
             static const QRegularExpression ghostRef(QStringLiteral("(?:^|,)ghost:(\\d+)(?:,|$)"));
             QHash<qint64, QJsonArray> usedOn;
             for (const db::Score& sc : db::scoresWithGhosts()) {
@@ -204,9 +205,76 @@ HttpResponse AdminService::route(const HttpRequest& request) {
             return json(200, QJsonObject{{QStringLiteral("removed"), QString::number(id)}});
         }
     }
+    // Clubs: GET lists them with members and open invites/requests, DELETE ?id= removes one
+    // (members, invites and its fame go with it).
+    if (what == QLatin1String("clubs") && parts.size() == 2) {
+        if (m == "GET") {
+            QHash<qint64, QJsonArray> invitesByClub;
+            const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+            for (const db::ClubInvite& i : db::clubInvites()) {
+                if (i.status == db::InviteClosed || i.expires <= nowMs) {
+                    continue;
+                }
+                invitesByClub[i.clubId].append(QJsonObject{
+                    {QStringLiteral("id"), QString::number(i.id)},
+                    {QStringLiteral("account_id"), QString::number(i.accountId)},
+                    {QStringLiteral("name"), egsPlayerName(i.accountId)},
+                    {QStringLiteral("kind"), i.status == db::InviteRequest
+                                                 ? QStringLiteral("join request")
+                                                 : QStringLiteral("invite")},
+                    {QStringLiteral("invited_by"), egsPlayerName(i.invitedBy)},
+                    {QStringLiteral("created"), double(i.created)},
+                    {QStringLiteral("expires"), double(i.expires)},
+                });
+            }
+            QJsonArray out;
+            for (const db::Club& c : db::clubs()) {
+                QJsonArray members;
+                QString owner;
+                for (const db::ClubMember& mem : db::clubMembers(c.id)) {
+                    const QString name = egsPlayerName(mem.accountId);
+                    if (mem.type == db::ClubOwner) {
+                        owner = name;
+                    }
+                    members.append(QJsonObject{
+                        {QStringLiteral("account_id"), QString::number(mem.accountId)},
+                        {QStringLiteral("name"), name},
+                        {QStringLiteral("role"), mem.type == db::ClubOwner
+                                                     ? QStringLiteral("owner")
+                                                     : QStringLiteral("member")},
+                        {QStringLiteral("joined"), double(mem.joined)},
+                    });
+                }
+                out.append(QJsonObject{
+                    {QStringLiteral("id"), QString::number(c.id)},
+                    {QStringLiteral("name"), c.name},
+                    {QStringLiteral("membership"), c.membership},
+                    {QStringLiteral("status"), c.status},
+                    {QStringLiteral("fame"), double(c.xp)},
+                    {QStringLiteral("created"), double(c.created)},
+                    {QStringLiteral("owner"), owner},
+                    {QStringLiteral("members"), members},
+                    {QStringLiteral("invites"), invitesByClub.value(c.id)},
+                    {QStringLiteral("customized"), !c.customization.isEmpty()},
+                });
+            }
+            return json(200, out);
+        }
+        if (m == "DELETE") {
+            const qint64 id = request.query.queryItemValue(QStringLiteral("id")).toLongLong();
+            const auto club = db::club(id);
+            if (!club || !db::removeClub(id)) {
+                return error(404, QStringLiteral("no such club"));
+            }
+            qCInfo(lcAdmin).noquote() << "removed club" << id << club->name;
+            return json(200, QJsonObject{{QStringLiteral("removed"), QString::number(id)}});
+        }
+    }
     if (what == QLatin1String("challenges") && parts.size() == 2 && m == "GET") {
         return json(200, otgChallenges());
     }
+    // Featured (Community / Evo) challenges. POST {id, list: community|evo, extend_days};
+    // DELETE ?id=&list=.
     if (what == QLatin1String("challenges") && parts.size() == 3 &&
         parts.at(2) == QLatin1String("feature")) {
         if (m == "POST") {
@@ -341,7 +409,6 @@ HttpResponse AdminService::route(const HttpRequest& request) {
     }
     if (what == QLatin1String("players") && parts.size() == 3 &&
         parts[2] == QLatin1String("fame") && (m == "POST" || m == "PUT")) {
-        // {"account_id": "1839021443", "xp": 10619}: sets the fame exactly (may lower it).
         const QJsonObject o = QJsonDocument::fromJson(request.body).object();
         const qint64 account = o.value(QStringLiteral("account_id")).toVariant().toLongLong();
         const QJsonValue xpValue = o.value(QStringLiteral("xp"));

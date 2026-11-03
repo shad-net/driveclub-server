@@ -129,11 +129,6 @@ int main(int argc, char* argv[]) {
     qInfo(config->egs.friendLists
               ? "friend lists on (egs.friend_lists): each player's friends follow their PSN friends"
               : "friend lists off (egs.friend_lists): every player is everyone's friend");
-    if (config->egs.clubDiscovery) {
-        qWarning("club discovery mode is on (egs.club_discovery): club requests are listed, logged "
-                 "and answered 503");
-    }
-
     const QString basePath = config->basePath;
     HttpServer server([basePath](const HttpRequest& request, HttpServer::Responder reply) {
         const QString label = endpointLabel(request);

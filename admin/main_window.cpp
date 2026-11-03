@@ -42,7 +42,6 @@ namespace {
 
 constexpr int MaxTrafficRows = 2000;
 
-// ms since epoch -> local time
 QString when(double ms) {
     if (ms <= 0) {
         return QStringLiteral("-");
@@ -134,7 +133,7 @@ QString scoreTime(quint64 score) {
         return {};
     }
     const quint64 ms = TimeMask - score;
-    if (ms >= quint64(24) * 3600 * 1000) {
+    if (ms >= quint64(24) * 3600 * 1000) { // a small kind-0 value is not a plausible time
         return {};
     }
     return formatMs(ms);
@@ -156,6 +155,7 @@ QString scoreValue(quint64 score) {
     return QObject::tr("invalid kind %1").arg(kind);
 }
 
+// "m:ss.mmm", "ss.mmm" or plain milliseconds -> milliseconds, -1 when invalid.
 qint64 parseTime(const QString& text) {
     const QString t = text.trimmed();
     static const QRegularExpression re(QStringLiteral("^(?:(\\d+):)?(\\d+)(?:\\.(\\d{1,3}))?$"));
@@ -227,6 +227,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     tabs_->addTab(buildChallengesTab(), tr("Challenges"));
     tabs_->addTab(buildCountersTab(), tr("Counters"));
     tabs_->addTab(buildGhostsTab(), tr("Ghosts"));
+    tabs_->addTab(buildClubsTab(), tr("Clubs"));
     tabs_->addTab(buildStatsTab(), tr("Stats"));
     tabs_->addTab(buildTrafficTab(), tr("Traffic"));
     setCentralWidget(tabs_);
@@ -396,6 +397,124 @@ QWidget* MainWindow::buildCountersTab() {
     connect(counterTable_, &QTableWidget::itemSelectionChanged, this, &MainWindow::updateButtons);
     connect(resetCounter_, &QPushButton::clicked, this, &MainWindow::resetCounter);
     return page;
+}
+
+QWidget* MainWindow::buildClubsTab() {
+    auto* page = new QWidget;
+    auto* layout = new QVBoxLayout(page);
+    layout->addWidget(new QLabel(
+        tr("<b>Clubs</b> created in the game (clubService). At most 6 members, one owner. Club "
+           "fame is the sum of the members' club fame. Deleting a club removes its members, "
+           "invites and fame.")));
+    clubTable_ = makeTable({tr("ID"), tr("Name"), tr("Members"), tr("Owner"), tr("Fame"),
+                            tr("Membership"), tr("Open invites"), tr("Created")});
+    layout->addWidget(clubTable_, 3);
+    clubTitle_ = new QLabel(tr("Select a club to see its members"));
+    layout->addWidget(clubTitle_);
+    clubMemberTable_ = makeTable({tr("Player"), tr("Role"), tr("Joined"), tr("Account ID")});
+    layout->addWidget(clubMemberTable_, 2);
+    deleteClub_ = new QPushButton(tr("Delete club"));
+    auto* buttons = new QHBoxLayout;
+    buttons->addStretch();
+    buttons->addWidget(deleteClub_);
+    layout->addLayout(buttons);
+    connect(clubTable_, &QTableWidget::itemSelectionChanged, this, &MainWindow::showClubDetails);
+    connect(clubTable_, &QTableWidget::itemSelectionChanged, this, &MainWindow::updateButtons);
+    connect(deleteClub_, &QPushButton::clicked, this, &MainWindow::deleteClub);
+    return page;
+}
+
+void MainWindow::showClubs(const QJsonArray& clubs) {
+    const int old = selectedIndex(clubTable_);
+    const QString selected = old < 0 ? QString() : clubs_.at(old).toObject().value("id").toString();
+    clubs_ = clubs;
+    clubTable_->blockSignals(true);
+    clubTable_->setSortingEnabled(false);
+    clubTable_->clearSelection();
+    clubTable_->setRowCount(int(clubs.size()));
+    int reselect = -1;
+    for (int i = 0; i < clubs.size(); ++i) {
+        const QJsonObject c = clubs.at(i).toObject();
+        auto* id = numberCell(c.value("id").toString().toDouble());
+        id->setData(Qt::UserRole, i);
+        clubTable_->setItem(i, 0, id);
+        clubTable_->setItem(i, 1, cell(c.value("name").toString()));
+        clubTable_->setItem(i, 2, numberCell(c.value("members").toArray().size()));
+        clubTable_->setItem(i, 3, cell(c.value("owner").toString()));
+        clubTable_->setItem(i, 4, numberCell(c.value("fame").toDouble()));
+        clubTable_->setItem(i, 5, numberCell(c.value("membership").toInt()));
+        QStringList invites;
+        for (const QJsonValue& v : c.value("invites").toArray()) {
+            const QJsonObject o = v.toObject();
+            invites << QStringLiteral("%1 (%2)").arg(o.value("name").toString(),
+                                                     o.value("kind").toString());
+        }
+        auto* inv = cell(invites.isEmpty() ? QString() : QString::number(invites.size()));
+        inv->setToolTip(invites.join('\n'));
+        clubTable_->setItem(i, 6, inv);
+        clubTable_->setItem(i, 7, cell(when(c.value("created").toDouble())));
+        if (c.value("id").toString() == selected) {
+            reselect = i;
+        }
+    }
+    clubTable_->setSortingEnabled(true);
+    for (int row = 0; reselect >= 0 && row < clubTable_->rowCount(); ++row) {
+        if (clubTable_->item(row, 0)->data(Qt::UserRole).toInt() == reselect) {
+            clubTable_->selectRow(row);
+        }
+    }
+    clubTable_->resizeColumnsToContents();
+    clubTable_->blockSignals(false);
+    showClubDetails();
+    updateButtons();
+}
+
+void MainWindow::showClubDetails() {
+    const int i = selectedIndex(clubTable_);
+    if (i < 0) {
+        clubTitle_->setText(tr("Select a club to see its members"));
+        clubMemberTable_->setRowCount(0);
+        return;
+    }
+    const QJsonObject c = clubs_.at(i).toObject();
+    clubTitle_->setText(
+        tr("<b>%1</b> (club %2)")
+            .arg(c.value("name").toString().toHtmlEscaped(), c.value("id").toString()));
+    const QJsonArray members = c.value("members").toArray();
+    clubMemberTable_->setSortingEnabled(false);
+    clubMemberTable_->setRowCount(int(members.size()));
+    for (int r = 0; r < members.size(); ++r) {
+        const QJsonObject m = members.at(r).toObject();
+        clubMemberTable_->setItem(r, 0, cell(m.value("name").toString()));
+        clubMemberTable_->setItem(r, 1, cell(m.value("role").toString()));
+        clubMemberTable_->setItem(r, 2, cell(when(m.value("joined").toDouble())));
+        clubMemberTable_->setItem(r, 3, numberCell(m.value("account_id").toString().toDouble()));
+    }
+    clubMemberTable_->setSortingEnabled(true);
+    clubMemberTable_->resizeColumnsToContents();
+}
+
+void MainWindow::deleteClub() {
+    const int i = selectedIndex(clubTable_);
+    if (i < 0) {
+        return;
+    }
+    const QJsonObject c = clubs_.at(i).toObject();
+    if (QMessageBox::question(this, tr("Delete club"),
+                              tr("Delete club %1 \"%2\" with its %3 members, invites and fame?")
+                                  .arg(c.value("id").toString(), c.value("name").toString())
+                                  .arg(c.value("members").toArray().size())) != QMessageBox::Yes) {
+        return;
+    }
+    api_.remove(QStringLiteral("/api/clubs?id=%1").arg(c.value("id").toString()),
+                [this](const ApiClient::Reply& r) {
+                    if (!r.ok()) {
+                        reportError(tr("Delete club"), r);
+                        return;
+                    }
+                    setStatus(tr("Club deleted"));
+                    refresh();
+                });
 }
 
 QWidget* MainWindow::buildGhostsTab() {
@@ -631,6 +750,11 @@ void MainWindow::refresh() {
     api_.get(QStringLiteral("/api/ghosts"), [this](const ApiClient::Reply& r) {
         if (r.ok()) {
             showGhosts(r.json().array());
+        }
+    });
+    api_.get(QStringLiteral("/api/clubs"), [this](const ApiClient::Reply& r) {
+        if (r.ok()) {
+            showClubs(r.json().array());
         }
     });
     api_.get(QStringLiteral("/api/stats"), [this](const ApiClient::Reply& r) {
@@ -912,7 +1036,6 @@ QString checksumHex(const QString& base64) {
 } // namespace
 
 void MainWindow::showGhosts(const QJsonArray& ghosts) {
-    // Keep the selection across the 5 s refresh.
     const int old = selectedIndex(ghostTable_);
     const QString selected =
         old < 0 ? QString() : ghosts_.at(old).toObject().value("id").toString();
@@ -1317,6 +1440,7 @@ void MainWindow::appendTraffic(const QJsonArray& requests) {
         trafficTable_->setItem(row, 2, cell(r.value("method").toString()));
         const QString label = r.value("label").toString();
         trafficTable_->setItem(row, 3, cell(label.isEmpty() ? tr("(unknown)") : label));
+        // An expected status (e.g. 404 = gamestate not stored yet) is not an error.
         const bool error = status >= 400 && !r.value("expected").toBool();
         auto* statusItem = cell(QString::number(status));
         statusItem->setData(Qt::UserRole + 1, error);
@@ -1660,6 +1784,7 @@ void MainWindow::updateButtons() {
     saveGhost_->setEnabled(connected_ && selectedIndex(ghostTable_) >= 0);
     deleteGhost_->setEnabled(connected_ && selectedIndex(ghostTable_) >= 0);
     deleteUnused_->setEnabled(connected_ && !ghosts_.isEmpty());
+    deleteClub_->setEnabled(connected_ && selectedIndex(clubTable_) >= 0);
 }
 
 void MainWindow::setStatus(const QString& text, bool error) {

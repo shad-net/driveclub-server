@@ -75,6 +75,8 @@ message GetMinimalProfilesRequest {
 
 message AccountProgression {
   optional int64 xp = 1;
+  optional int64 stars = 2;
+  optional int64 elite = 3;
 }
 
 message MinimalProfile {
@@ -566,7 +568,6 @@ message GetAccoladeProgressRequest {
   optional int64 accountId = 4;
 }
 
-// Builder 0x6359A0, the same with currentClub and clubId.
 message GetClubAccoladeProgressRequest {
   optional bool currentClub = 1;
   optional int64 accoladeId = 2;
@@ -635,4 +636,106 @@ enum SessionAction {
 message SessionCallbackMessage {
   optional int64 accountId = 1;
   optional SessionAction sessionAction = 2;
+}
+
+// ---- clubService pushes (/egs/messaging) ---------------------------------------------------
+
+enum ActivityVerb {
+  ACTIVITY_VERB_0 = 0;
+  ACTIVITY_VERB_1 = 1;
+  ACTIVITY_VERB_2 = 2;
+  ACTIVITY_VERB_3 = 3;
+  ACTIVITY_VERB_4 = 4;
+  ACTIVITY_VERB_JOINED = 5;
+  ACTIVITY_VERB_6 = 6;
+  ACTIVITY_VERB_KICKED = 7;
+  ACTIVITY_VERB_LEFT = 8;
+  ACTIVITY_VERB_9 = 9;
+  ACTIVITY_VERB_10 = 10;
+  ACTIVITY_VERB_REQUESTED = 11;
+  ACTIVITY_VERB_12 = 12;
+  ACTIVITY_VERB_13 = 13;
+  ACTIVITY_VERB_14 = 14;
+  ACTIVITY_VERB_15 = 15;
+  ACTIVITY_VERB_16 = 16;
+  ACTIVITY_VERB_17 = 17;
+  ACTIVITY_VERB_18 = 18;
+  ACTIVITY_VERB_19 = 19;
+  ACTIVITY_VERB_20 = 20;
+}
+
+enum ActivitySubjectType {
+  ACTIVITY_SUBJECT_0 = 0;
+  ACTIVITY_SUBJECT_1 = 1;
+  ACTIVITY_SUBJECT_2 = 2;
+  ACTIVITY_SUBJECT_3 = 3;
+  ACTIVITY_SUBJECT_4 = 4;
+  ACTIVITY_SUBJECT_5 = 5;
+  ACTIVITY_SUBJECT_6 = 6;
+  ACTIVITY_SUBJECT_7 = 7;
+  ACTIVITY_SUBJECT_8 = 8;
+  ACTIVITY_SUBJECT_9 = 9;
+  ACTIVITY_SUBJECT_10 = 10;
+  ACTIVITY_SUBJECT_11 = 11;
+  ACTIVITY_SUBJECT_12 = 12;
+  ACTIVITY_SUBJECT_13 = 13;
+  ACTIVITY_SUBJECT_14 = 14;
+  ACTIVITY_SUBJECT_CLUB = 15;
+  ACTIVITY_SUBJECT_16 = 16;
+  ACTIVITY_SUBJECT_17 = 17;
+  ACTIVITY_SUBJECT_18 = 18;
+  ACTIVITY_SUBJECT_19 = 19;
+  ACTIVITY_SUBJECT_20 = 20;
+}
+
+enum ActivityAuthorType {
+  ACTIVITY_AUTHOR_0 = 0;
+  ACTIVITY_AUTHOR_1 = 1;
+  ACTIVITY_AUTHOR_2 = 2;
+  ACTIVITY_AUTHOR_3 = 3;
+}
+
+message MsgClubMemberChange {
+  optional int64 club = 1;
+  optional int64 account = 2;
+  optional ActivityVerb verb = 3;
+}
+
+message MsgNotification {
+  optional ActivityAuthorType authorType = 1;
+  optional int64 club = 2;
+  optional int64 createdBy = 3;
+  optional int64 createdByClub = 4;
+  optional int64 id = 5;
+  optional string localizedActivityText = 6;
+  optional string localizedElapsedTimeText = 7;
+  optional int64 subjectId = 8;
+  optional ActivitySubjectType subjectType = 9;
+  optional ActivityVerb verb = 10;
+  optional int64 version = 11;
+}
+
+message MsgInviteCallback {
+  optional int64 club = 1;
+  optional int64 account = 2;
+}
+
+message MsgClubStatusChange {
+  optional int64 club = 1;
+  optional int64 account = 2;
+}
+
+message MsgClubProfileChange {
+  optional int64 club = 1;
+  optional int64 account = 2;
+}
+
+message MsgClubDetailsChange {
+  optional int64 club = 1;
+  optional int64 account = 2;
+}
+
+message MsgClubProgressionChange {
+  optional int64 club = 1;
+  optional int64 account = 2;
 }

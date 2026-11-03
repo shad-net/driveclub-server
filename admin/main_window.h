@@ -31,6 +31,7 @@ private:
     QWidget* buildLeaderboardsTab();
     QWidget* buildCountersTab();
     QWidget* buildGhostsTab();
+    QWidget* buildClubsTab();
     QWidget* buildStatsTab();
     QWidget* buildChallengesTab();
     QWidget* buildTrafficTab();
@@ -44,6 +45,9 @@ private:
     void showPlayers(const QJsonArray& players);
     void showCounters(const QJsonArray& counters);
     void showGhosts(const QJsonArray& ghosts);
+    void showClubs(const QJsonArray& clubs);
+    void showClubDetails();
+    void deleteClub();
     void showGhostUses();
     void showStatsPlayers(const QJsonObject& stats);
     void loadStatsTable();
@@ -81,6 +85,7 @@ private:
     QJsonArray players_;
     QJsonArray counters_;
     QJsonArray ghosts_;
+    QJsonArray clubs_;
     QJsonArray statsPlayers_;
     QJsonArray challenges_;
     QJsonArray boards_;
@@ -119,6 +124,10 @@ private:
     QPushButton* resetCounter_;
 
     QTableWidget* ghostTable_;
+    QTableWidget* clubTable_;
+    QTableWidget* clubMemberTable_;
+    QLabel* clubTitle_;
+    QPushButton* deleteClub_;
     QTableWidget* ghostUses_;
     QLabel* ghostTitle_;
     QPushButton* saveGhost_;

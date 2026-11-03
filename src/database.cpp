@@ -118,6 +118,41 @@ const char* const Migrations[] = {
         PRIMARY KEY (account_id, name)
     );
     )",
+    // 7: clubs (clubService). Club ids start at 1001, invite ids at 5001. customization is the
+    // club's ClubCustomization protobuf as sent by
+    // the game. A player is in at most one club. Invites and join requests share one table, as in
+    // the game (findInvites): status 1 = join request, 2 = invite sent, 3 = closed.
+    R"(
+    CREATE TABLE clubs (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        name          TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        membership    INTEGER NOT NULL DEFAULT 0,
+        status        INTEGER NOT NULL DEFAULT 1,
+        xp            INTEGER NOT NULL DEFAULT 0,
+        customization BLOB NOT NULL DEFAULT x'',
+        created       INTEGER NOT NULL
+    );
+    CREATE TABLE club_members (
+        account_id INTEGER PRIMARY KEY,
+        club_id    INTEGER NOT NULL REFERENCES clubs (id) ON DELETE CASCADE,
+        type       INTEGER NOT NULL,
+        mvp        INTEGER NOT NULL DEFAULT 0,
+        joined     INTEGER NOT NULL
+    );
+    CREATE INDEX club_members_club ON club_members (club_id);
+    CREATE TABLE club_invites (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        club_id    INTEGER NOT NULL REFERENCES clubs (id) ON DELETE CASCADE,
+        account_id INTEGER NOT NULL,
+        invited_by INTEGER NOT NULL,
+        status     INTEGER NOT NULL,
+        created    INTEGER NOT NULL,
+        updated    INTEGER NOT NULL,
+        expires    INTEGER NOT NULL
+    );
+    INSERT INTO sqlite_sequence (name, seq) VALUES ('clubs', 1000);
+    INSERT INTO sqlite_sequence (name, seq) VALUES ('club_invites', 5000);
+    )",
 };
 
 QMutex& lock() {
@@ -189,6 +224,7 @@ Player playerFrom(const QSqlQuery& q) {
 constexpr char PlayerColumns[] =
     "account_id, name, logged_in, shadnet_account, first_seen, last_seen";
 constexpr char ScoreColumns[] = "board, entrant, score, attachment, updated";
+
 QString text(const QString& s) {
     return s.isNull() ? QStringLiteral("") : s;
 }
@@ -353,6 +389,7 @@ QList<Score> scoresWithGhosts() {
     QList<Score> out;
     QMutexLocker l(&lock());
     QSqlQuery q(connection());
+    // "ghost:-1" is the game's "no ghost"; the caller parses the id.
     q.prepare(QStringLiteral("SELECT %1 FROM scores WHERE attachment LIKE '%ghost:%' "
                              "AND attachment NOT LIKE '%ghost:-%'")
                   .arg(QLatin1String(ScoreColumns)));
@@ -749,6 +786,258 @@ bool hasFriendList(qint64 accountId) {
     q.prepare(QStringLiteral("SELECT 1 FROM friends WHERE account_id = ? LIMIT 1"));
     q.addBindValue(accountId);
     return run(q, "check friends") && q.next();
+}
+
+// ---- Clubs ------------------------------------------------------------------------------------
+
+namespace {
+Club clubFrom(const QSqlQuery& q) {
+    Club c;
+    c.id = q.value(0).toLongLong();
+    c.name = q.value(1).toString();
+    c.membership = q.value(2).toInt();
+    c.status = q.value(3).toInt();
+    c.xp = q.value(4).toLongLong();
+    c.customization = q.value(5).toByteArray();
+    c.created = q.value(6).toLongLong();
+    return c;
+}
+constexpr char ClubColumns[] = "id, name, membership, status, xp, customization, created";
+
+ClubInvite inviteFrom(const QSqlQuery& q) {
+    ClubInvite i;
+    i.id = q.value(0).toLongLong();
+    i.clubId = q.value(1).toLongLong();
+    i.accountId = q.value(2).toLongLong();
+    i.invitedBy = q.value(3).toLongLong();
+    i.status = q.value(4).toInt();
+    i.created = q.value(5).toLongLong();
+    i.updated = q.value(6).toLongLong();
+    i.expires = q.value(7).toLongLong();
+    return i;
+}
+constexpr char InviteColumns[] =
+    "id, club_id, account_id, invited_by, status, created, updated, expires";
+} // namespace
+
+QList<Club> clubs() {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT %1 FROM clubs ORDER BY id").arg(QLatin1String(ClubColumns)));
+    QList<Club> out;
+    if (run(q, "list clubs")) {
+        while (q.next()) {
+            out.append(clubFrom(q));
+        }
+    }
+    return out;
+}
+
+std::optional<Club> club(qint64 id) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT %1 FROM clubs WHERE id = ?").arg(QLatin1String(ClubColumns)));
+    q.addBindValue(id);
+    if (run(q, "read club") && q.next()) {
+        return clubFrom(q);
+    }
+    return std::nullopt;
+}
+
+std::optional<Club> clubByName(const QString& name) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(
+        QStringLiteral("SELECT %1 FROM clubs WHERE name = ?").arg(QLatin1String(ClubColumns)));
+    q.addBindValue(text(name));
+    if (run(q, "read club by name") && q.next()) {
+        return clubFrom(q);
+    }
+    return std::nullopt;
+}
+
+qint64 createClub(const QString& name, int membership, qint64 owner) {
+    QMutexLocker l(&lock());
+    QSqlDatabase d = connection();
+    d.transaction();
+    QSqlQuery q(d);
+    q.prepare(QStringLiteral("INSERT INTO clubs (name, membership, created) VALUES (?, ?, ?)"));
+    q.addBindValue(text(name));
+    q.addBindValue(membership);
+    q.addBindValue(now());
+    if (!run(q, "create club")) {
+        d.rollback();
+        return 0;
+    }
+    const qint64 id = q.lastInsertId().toLongLong();
+    QSqlQuery m(d);
+    m.prepare(
+        QStringLiteral("INSERT OR REPLACE INTO club_members (account_id, club_id, type, joined) "
+                       "VALUES (?, ?, ?, ?)"));
+    m.addBindValue(owner);
+    m.addBindValue(id);
+    m.addBindValue(ClubOwner);
+    m.addBindValue(now());
+    if (!run(m, "add club owner")) {
+        d.rollback();
+        return 0;
+    }
+    d.commit();
+    return id;
+}
+
+bool updateClub(const Club& c) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("UPDATE clubs SET name = ?, membership = ?, status = ?, xp = ?, "
+                             "customization = ? WHERE id = ?"));
+    q.addBindValue(text(c.name));
+    q.addBindValue(c.membership);
+    q.addBindValue(c.status);
+    q.addBindValue(c.xp);
+    q.addBindValue(c.customization.isNull() ? QByteArray("") : c.customization);
+    q.addBindValue(c.id);
+    return run(q, "save club");
+}
+
+qint64 addClubXp(qint64 clubId, qint64 delta) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("UPDATE clubs SET xp = xp + ? WHERE id = ?"));
+    q.addBindValue(delta);
+    q.addBindValue(clubId);
+    run(q, "add club fame");
+    QSqlQuery r(connection());
+    r.prepare(QStringLiteral("SELECT xp FROM clubs WHERE id = ?"));
+    r.addBindValue(clubId);
+    return run(r, "read club fame") && r.next() ? r.value(0).toLongLong() : 0;
+}
+
+bool removeClub(qint64 id) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("DELETE FROM clubs WHERE id = ?"));
+    q.addBindValue(id);
+    return run(q, "remove club") && q.numRowsAffected() > 0;
+}
+
+QList<ClubMember> clubMembers(qint64 clubId) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT account_id, club_id, type, mvp, joined FROM club_members "
+                             "WHERE club_id = ? ORDER BY joined, account_id"));
+    q.addBindValue(clubId);
+    QList<ClubMember> out;
+    if (run(q, "list club members")) {
+        while (q.next()) {
+            out.append({q.value(0).toLongLong(), q.value(1).toLongLong(), q.value(2).toInt(),
+                        q.value(3).toBool(), q.value(4).toLongLong()});
+        }
+    }
+    return out;
+}
+
+std::optional<ClubMember> clubMember(qint64 accountId) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT account_id, club_id, type, mvp, joined FROM club_members "
+                             "WHERE account_id = ?"));
+    q.addBindValue(accountId);
+    if (run(q, "read club member") && q.next()) {
+        return ClubMember{q.value(0).toLongLong(), q.value(1).toLongLong(), q.value(2).toInt(),
+                          q.value(3).toBool(), q.value(4).toLongLong()};
+    }
+    return std::nullopt;
+}
+
+bool putClubMember(const ClubMember& m) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("INSERT OR REPLACE INTO club_members (account_id, club_id, type, mvp, "
+                             "joined) VALUES (?, ?, ?, ?, ?)"));
+    q.addBindValue(m.accountId);
+    q.addBindValue(m.clubId);
+    q.addBindValue(m.type);
+    q.addBindValue(m.mvp ? 1 : 0);
+    q.addBindValue(m.joined ? m.joined : now());
+    return run(q, "save club member");
+}
+
+bool removeClubMember(qint64 accountId) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("DELETE FROM club_members WHERE account_id = ?"));
+    q.addBindValue(accountId);
+    return run(q, "remove club member") && q.numRowsAffected() > 0;
+}
+
+QList<ClubInvite> clubInvites() {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT %1 FROM club_invites ORDER BY created DESC, id DESC")
+                  .arg(QLatin1String(InviteColumns)));
+    QList<ClubInvite> out;
+    if (run(q, "list club invites")) {
+        while (q.next()) {
+            out.append(inviteFrom(q));
+        }
+    }
+    return out;
+}
+
+std::optional<ClubInvite> clubInvite(qint64 id) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT %1 FROM club_invites WHERE id = ?")
+                  .arg(QLatin1String(InviteColumns)));
+    q.addBindValue(id);
+    if (run(q, "read club invite") && q.next()) {
+        return inviteFrom(q);
+    }
+    return std::nullopt;
+}
+
+qint64 addClubInvite(qint64 clubId, qint64 accountId, qint64 invitedBy, int status, qint64 ttlMs) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("INSERT INTO club_invites (club_id, account_id, invited_by, status, "
+                             "created, updated, expires) VALUES (?, ?, ?, ?, ?, ?, ?)"));
+    const qint64 t = now();
+    q.addBindValue(clubId);
+    q.addBindValue(accountId);
+    q.addBindValue(invitedBy);
+    q.addBindValue(status);
+    q.addBindValue(t);
+    q.addBindValue(t);
+    q.addBindValue(t + ttlMs);
+    return run(q, "add club invite") ? q.lastInsertId().toLongLong() : 0;
+}
+
+int closeClubInvites(qint64 accountId, qint64 clubId, qint64 inviteId) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    QString where = QStringLiteral("status <> ?");
+    if (inviteId) {
+        where += QStringLiteral(" AND id = ?");
+    } else {
+        where += QStringLiteral(" AND account_id = ?");
+        if (clubId) {
+            where += QStringLiteral(" AND club_id = ?");
+        }
+    }
+    q.prepare(QStringLiteral("UPDATE club_invites SET status = ?, updated = ? WHERE ") + where);
+    q.addBindValue(InviteClosed);
+    q.addBindValue(now());
+    q.addBindValue(InviteClosed);
+    if (inviteId) {
+        q.addBindValue(inviteId);
+    } else {
+        q.addBindValue(accountId);
+        if (clubId) {
+            q.addBindValue(clubId);
+        }
+    }
+    return run(q, "close club invites") ? q.numRowsAffected() : 0;
 }
 
 // ---- Ghosts -----------------------------------------------------------------------------------

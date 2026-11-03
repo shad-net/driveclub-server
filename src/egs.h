@@ -16,7 +16,6 @@ constexpr char EgsKey[] = "ca91f51f-a7f5-4b95-814a-5796cfff586c";
 struct EgsConfig {
     QString serverIdentifier = QStringLiteral("dc-community");
     QString version = QStringLiteral("1");
-    bool clubDiscovery = false;
     bool friendLists = true;
 };
 
