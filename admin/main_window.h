@@ -19,10 +19,14 @@ class QTableWidget;
 class QTabWidget;
 class QTimer;
 
+// driveclub-admin: overview, players (EGS sessions and OTG tokens), leaderboards and live
+// traffic of a running driveclub-server, through its admin API.
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget* parent = nullptr);
+
+    // Fills the connection fields and connects (used by the command line).
     void connectTo(const QString& url, const QString& key);
 
 private:
@@ -42,6 +46,10 @@ private:
     void showStatus(const QJsonObject& status);
     void showSessions(const QJsonArray& sessions);
     void showTokens(const QJsonArray& tokens);
+    void showParties(const QJsonArray& parties);
+    void setPlayerTabCount(int index, const QString& name, qsizetype count);
+    void addTableTools(QWidget* root);
+    void exportCsv(QTableWidget* table);
     void showPlayers(const QJsonArray& players);
     void showCounters(const QJsonArray& counters);
     void showGhosts(const QJsonArray& ghosts);
@@ -66,6 +74,13 @@ private:
     void kickSession();
     void revokeToken();
     void setFame();
+    void setClubFame();
+    void renameClub();
+    void removeClubMember();
+    void kickPartyMember();
+    void disbandParty();
+    void showPlayerPage();
+    void showActivity(const QJsonObject& activity);
     void resetCounter();
     void featureChallenge(const QString& list);
     void unfeatureChallenge();
@@ -89,6 +104,7 @@ private:
     QJsonArray counters_;
     QJsonArray ghosts_;
     QJsonArray clubs_;
+    QJsonArray parties_;
     QJsonArray clubReports_;
     QJsonArray statsPlayers_;
     QJsonArray challenges_;
@@ -111,6 +127,8 @@ private:
 
     QTableWidget* sessionTable_;
     QTableWidget* tokenTable_;
+    QTableWidget* partyTable_;
+    QTabWidget* playerTabs_;
     QPushButton* kick_;
     QPushButton* revoke_;
     QTableWidget* playerTable_;
@@ -133,6 +151,14 @@ private:
     QLabel* clubTitle_;
     QPushButton* deleteClub_;
     QPushButton* makeOwner_;
+    QPushButton* removeClubMember_;
+    QPushButton* setClubFame_;
+    QPushButton* renameClub_;
+    QPushButton* playerPage_;
+    QPushButton* kickPartyMember_;
+    QPushButton* disbandParty_;
+    QLabel* activity_;
+    QTableWidget* warningTable_;
     QTableWidget* clubReportTable_;
     QPushButton* dismissReport_;
     QTableWidget* ghostUses_;
