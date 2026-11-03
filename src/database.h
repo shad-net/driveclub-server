@@ -123,6 +123,8 @@ struct Accolade {
 QList<Accolade> accolades(qint64 accountId);
 qint64 addAccoladeProgress(qint64 accountId, const QString& name, qint64 delta); // new total
 QList<qint64> accoladeAccounts();
+QList<Accolade> clubAccolades(qint64 clubId);
+qint64 addClubAccoladeProgress(qint64 clubId, const QString& name, qint64 delta);
 bool removeAccolades(qint64 accountId);
 
 // ---- Friends ----------------------------------------------------------------------------------
@@ -182,6 +184,19 @@ QList<ClubInvite> clubInvites(); // newest first
 std::optional<ClubInvite> clubInvite(qint64 id);
 qint64 addClubInvite(qint64 clubId, qint64 accountId, qint64 invitedBy, int status, qint64 ttlMs);
 int closeClubInvites(qint64 accountId, qint64 clubId = 0, qint64 inviteId = 0);
+// "Report club" from the game (moderationService.submitClubNameReport).
+struct ClubReport {
+    qint64 id = 0;
+    qint64 clubId = 0;
+    QString clubName; // as it was when reported
+    qint64 reporter = 0;
+    qint64 language = 0;
+    qint64 reason = 0;
+    qint64 created = 0;
+};
+qint64 addClubReport(const ClubReport& report);
+QList<ClubReport> clubReports(); // newest first
+bool removeClubReport(qint64 id);
 
 // ---- Ghosts -----------------------------------------------------------------------------------
 

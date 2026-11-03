@@ -216,6 +216,7 @@ Endpoint endpoint(const char* service, const char* method, bool secure, bool lis
 std::string endpointList();
 
 void login(Context& ctx, const OAuthLoginRequest& req, OAuthLoginResponse& resp) {
+    // A verified login uses shadNet's online id, not the name the client sent.
     const bool verified = ctx.auth.outcome == AuthResult::Outcome::Verified;
     QString name = verified ? ctx.auth.onlineId : qs(req.name());
     if (name.isEmpty()) {
@@ -486,6 +487,7 @@ void timeInfo(Context&, const Empty&, GetTimeInfoResponse& resp) {
     resp.set_timestamp(QDateTime::currentMSecsSinceEpoch());
 }
 
+// The session a request was signed with, or nullptr (call with sessions().mutex held).
 Session* sessionOf(const Context& ctx) {
     auto it = sessions().byKey.find(ctx.sessionKey);
     return it == sessions().byKey.end() ? nullptr : &*it;
@@ -520,6 +522,15 @@ std::function<void(Context&, const TransactionRequest&, TransactionResponse&)> t
 // ---------------------------------------------------------------------------------
 
 constexpr int ClubMaxMembers = 6;
+
+void putClubFameScore(qint64 club, qint64 xp) {
+    const QString entrant = QString::number(club);
+    db::putScore({QStringLiteral("fame/club"),
+                  entrant,
+                  (quint64(2) << 60) | quint64(std::max<qint64>(0, xp)),
+                  {},
+                  QDateTime::currentMSecsSinceEpoch()});
+}
 constexpr qint64 ClubInviteTtlMs = 7LL * 24 * 3600 * 1000; // the game's own 7-day reminder
 
 QString isoTime(qint64 ms) {
@@ -587,6 +598,7 @@ void removeFromClub(qint64 club, qint64 account, ActivityVerb verb) {
     const QList<db::ClubMember> rest = db::clubMembers(club);
     if (rest.isEmpty()) {
         db::removeClub(club);
+        db::removeScore(QStringLiteral("fame/club"), QString::number(club));
         qCInfo(lcEgs).noquote() << "club" << club << "is empty and was removed";
     } else if (std::none_of(rest.begin(), rest.end(),
                             [](const db::ClubMember& m) { return m.type == db::ClubOwner; })) {
@@ -598,7 +610,6 @@ void removeFromClub(qint64 club, qint64 account, ActivityVerb verb) {
     pushMemberChange(club, account, verb, before);
 }
 
-// Puts a player in a club (leaving their old one). False when the club is full or gone.
 bool addToClub(qint64 club, qint64 account) {
     if (!db::club(club)) {
         return false;
@@ -691,6 +702,7 @@ void clubCreate(Context& ctx, const ClubCreateRequest& req, ClubReply& resp) {
         return;
     }
     db::closeClubInvites(account);
+    putClubFameScore(id, 0);
     resp.set_id(id);
     resp.set_membership(req.membership());
     qCInfo(lcEgs).noquote() << me << "created club" << id << QStringLiteral("\"%1\"").arg(name)
@@ -849,6 +861,7 @@ void clubInvite(Context& ctx, const ClubAccountsRequest& req, Empty&) {
             pending |= i.accountId == who && i.clubId == club && i.status == db::InviteSent;
         }
         if (asked) {
+            // The owner accepts a join request by inviting the player.
             done << egsPlayerName(who) + (addToClub(club, who)
                                               ? QStringLiteral(" (request accepted)")
                                               : QStringLiteral(" (club full)"));
@@ -868,6 +881,8 @@ void clubInvite(Context& ctx, const ClubAccountsRequest& req, Empty&) {
 }
 
 void clubFindInvites(Context& ctx, const FindClubInvitesRequest& req, ClubInvitesResponse& resp) {
+    // findInvites (builder 0x62BF90): accountIds (own id) or clubIds, status filter,
+    // maximumEntries.
     QSet<qint64> accounts(req.accountids().begin(), req.accountids().end());
     QSet<qint64> clubs(req.clubids().begin(), req.clubids().end());
     QSet<int> status;
@@ -903,7 +918,6 @@ void clubFindInvites(Context& ctx, const FindClubInvitesRequest& req, ClubInvite
 }
 
 void clubReject(Context& ctx, const ClubIdRequest& req, Empty&) {
-    // rejectInvite / rejectJoinRequest {id = invite id}.
     const int closed = db::closeClubInvites(0, 0, req.id());
     qCInfo(lcEgs).noquote() << egsSessionName(ctx.sessionKey) << "rejected invite/request"
                             << req.id() << (closed ? QString() : QStringLiteral("(not open)"));
@@ -960,6 +974,41 @@ std::optional<std::pair<qint64, qint64>> ownerAndTarget(Context& ctx,
         return std::nullopt;
     }
     return std::make_pair(club, target);
+}
+
+void getKeywords(Context& ctx, const GetKeywordsRequest& req, GetKeywordsResponse& resp) {
+    QStringList asked;
+    for (const std::string& g : req.groupnames()) {
+        const QString group = qs(g);
+        const QStringList words = config().clubKeywords.value(group);
+        for (const QString& w : words) {
+            resp.add_keywords()->set_name(w.toStdString());
+        }
+        asked << QStringLiteral("%1 (%2)").arg(group).arg(words.size());
+    }
+    qCInfo(lcEgs).noquote() << "club keywords for" << egsSessionName(ctx.sessionKey) << ":"
+                            << asked.join(QStringLiteral(", ")) << "->" << resp.keywords_size();
+}
+
+void clubReport(Context& ctx, const ClubReportRequest& req, Empty&) {
+    QString me;
+    const qint64 account = sessionAccount(ctx, &me);
+    const auto club = db::club(req.entityid());
+    db::ClubReport r;
+    r.clubId = req.entityid();
+    r.clubName = club ? club->name : QString();
+    r.reporter = account ? account : req.reporteraccountid();
+    r.language = req.reportlanguageid();
+    r.reason = req.reportreasonid();
+    const qint64 id = db::addClubReport(r);
+    qCWarning(lcEgs).noquote()
+        << "club report" << id << ":" << (me.isEmpty() ? egsPlayerName(r.reporter) : me)
+        << "reported club" << r.clubId
+        << (club ? QStringLiteral("\"%1\"").arg(club->name) : QStringLiteral("(no such club)"))
+        << QStringLiteral("reason %1, language %2").arg(r.reason).arg(r.language)
+        << (req.reporteraccountid() && req.reporteraccountid() != r.reporter
+                ? QStringLiteral("(request said reporter %1)").arg(req.reporteraccountid())
+                : QString());
 }
 
 void clubKick(Context& ctx, const ClubAccountsRequest& req, Empty&) {
@@ -1041,7 +1090,6 @@ void updateFame(Context& ctx, const UpdateFameRequest& req, UpdateFameResponse& 
         }
         f.updated = QDateTime::currentMSecsSinceEpoch();
         db::putFame(f);
-        // Keep the OTG fame leaderboard (scores/fame/player) in step: kind 2 = plain points.
         const QString entrant = QString::number(account);
         const quint64 score = (quint64(2) << 60) | quint64(f.xp);
         const auto old = db::score(QStringLiteral("fame/player"), entrant);
@@ -1057,6 +1105,7 @@ void updateFame(Context& ctx, const UpdateFameRequest& req, UpdateFameResponse& 
     if (const auto member = account ? db::clubMember(account) : std::nullopt) {
         if (req.clubfamedelta() > 0) {
             clubXp = db::addClubXp(member->clubId, req.clubfamedelta());
+            putClubFameScore(member->clubId, clubXp);
             pushClubRefresh<MsgClubProgressionChange>(member->clubId, account);
             clubNote = QStringLiteral("club %1 +%2 = %3")
                            .arg(member->clubId)
@@ -1110,9 +1159,30 @@ void playerAccolades(Context& ctx, const GetAccoladeProgressRequest& req,
 }
 
 void clubAccolades(Context& ctx, const GetClubAccoladeProgressRequest& req,
-                   AccoladeProgressResponse&) {
-    qCInfo(lcEgs).noquote() << "club accolades for" << egsSessionName(ctx.sessionKey) << "-"
-                            << qs(req.ShortDebugString()) << "-> none (clubs not implemented)";
+                   AccoladeProgressResponse& resp) {
+    QString me;
+    const qint64 account = sessionAccount(ctx, &me);
+    qint64 club = req.clubid();
+    if (req.currentclub() || club == 0) {
+        const auto m = account ? db::clubMember(account) : std::nullopt;
+        club = m ? m->clubId : 0;
+    }
+    const QString only = qs(req.accoladename());
+    for (const db::Accolade& a : club ? db::clubAccolades(club) : QList<db::Accolade>()) {
+        if (!only.isEmpty() && a.name != only) {
+            continue;
+        }
+        AccoladeProgress* p = resp.add_progresslist();
+        p->set_accoladename(a.name.toStdString());
+        p->set_type(ACCOLADE_TYPE_2);
+        p->set_progress(a.progress);
+    }
+    qCInfo(lcEgs).noquote() << "club accolades of"
+                            << (club ? QStringLiteral("club %1").arg(club)
+                                     : QStringLiteral("no club"))
+                            << "for" << (me.isEmpty() ? QStringLiteral("?") : me) << "->"
+                            << resp.progresslist_size()
+                            << (resp.progresslist_size() == 1 ? "entry" : "entries");
 }
 
 void updateAccolades(Context& ctx, const UpdateAccoladeProgressRequest& req,
@@ -1129,9 +1199,42 @@ void updateAccolades(Context& ctx, const UpdateAccoladeProgressRequest& req,
             continue;
         }
         if (u.currentclub()) {
-            skipped << QStringLiteral("%1 %2%3 (club contribution, no clubs yet)")
-                           .arg(accolade, u.progress() >= 0 ? "+" : "")
-                           .arg(u.progress());
+            const auto member = account ? db::clubMember(account) : std::nullopt;
+            if (!member) {
+                skipped << QStringLiteral("%1 %2%3 (club contribution, not in a club)")
+                               .arg(accolade, u.progress() >= 0 ? "+" : "")
+                               .arg(u.progress());
+                continue;
+            }
+            const QString clubKey =
+                QStringLiteral("%1|%2|club|%3")
+                    .arg(QString::fromLatin1(ctx.sessionKey), qs(req.transactionid()), accolade);
+            bool fresh = true;
+            {
+                QMutexLocker l(&mutex);
+                fresh = req.transactionid().empty() || !applied.contains(clubKey);
+                applied.insert(clubKey);
+            }
+            qint64 total = 0;
+            if (fresh) {
+                total = db::addClubAccoladeProgress(member->clubId, accolade, u.progress());
+                changes << QStringLiteral("%1 %2%3 = %4 (club %5)")
+                               .arg(accolade, u.progress() >= 0 ? "+" : "")
+                               .arg(u.progress())
+                               .arg(total)
+                               .arg(member->clubId);
+            } else {
+                for (const db::Accolade& a : db::clubAccolades(member->clubId)) {
+                    if (a.name == accolade) {
+                        total = a.progress;
+                    }
+                }
+                skipped << QStringLiteral("%1 (club, already applied)").arg(accolade);
+            }
+            AccoladeProgress* p = resp.add_progresslist();
+            p->set_accoladename(accolade.toStdString());
+            p->set_type(ACCOLADE_TYPE_2);
+            p->set_progress(total);
             continue;
         }
         if (account == 0) {
@@ -1200,7 +1303,6 @@ void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& res
     const QString sent = qs(req.checksum());
     const QString actual = bobChecksum(data);
     if (!sent.isEmpty() && sent != actual) {
-        // Stored anyway, with the checksum we computed: the game checks downloads against it.
         qCWarning(lcEgs).noquote()
             << "ghost from" << name << "has checksum" << sent << "but the data gives" << actual;
     }
@@ -1273,6 +1375,7 @@ struct StatColumn {
     const char* counter;
 };
 
+// Per-subject sets: the category their subjects come from; all have the same six columns.
 const QList<QPair<QString, QString>>& rowSets() {
     static const QList<QPair<QString, QString>> sets = {
         {QStringLiteral("Tracks"), QStringLiteral("track")},
@@ -1518,6 +1621,10 @@ const QList<Endpoint>& endpoints() {
                                                    clubMembership),
         endpoint<UpdateCustomizationRequest, UpdateCustomizationResponse>(
             "clubService", "updateCustomization", false, true, clubCustomize),
+        endpoint<GetKeywordsRequest, GetKeywordsResponse>("keywordService", "getKeywords", false,
+                                                          true, getKeywords),
+        endpoint<ClubReportRequest, Empty>("moderationService", "submitClubNameReport", false, true,
+                                           clubReport),
         endpoint<ClubAccountsRequest, Empty>("clubService", "kick", false, true, clubKick),
         endpoint<ClubAccountsRequest, Empty>("clubService", "changeAdmin", false, true,
                                              clubChangeAdmin),

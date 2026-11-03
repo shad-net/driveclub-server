@@ -48,6 +48,8 @@ private:
     void showClubs(const QJsonArray& clubs);
     void showClubDetails();
     void deleteClub();
+    void showClubReports(const QJsonArray& reports);
+    void dismissClubReport();
     void showGhostUses();
     void showStatsPlayers(const QJsonObject& stats);
     void loadStatsTable();
@@ -86,6 +88,7 @@ private:
     QJsonArray counters_;
     QJsonArray ghosts_;
     QJsonArray clubs_;
+    QJsonArray clubReports_;
     QJsonArray statsPlayers_;
     QJsonArray challenges_;
     QJsonArray boards_;
@@ -128,6 +131,8 @@ private:
     QTableWidget* clubMemberTable_;
     QLabel* clubTitle_;
     QPushButton* deleteClub_;
+    QTableWidget* clubReportTable_;
+    QPushButton* dismissReport_;
     QTableWidget* ghostUses_;
     QLabel* ghostTitle_;
     QPushButton* saveGhost_;

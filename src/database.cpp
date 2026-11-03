@@ -153,6 +153,30 @@ const char* const Migrations[] = {
     INSERT INTO sqlite_sequence (name, seq) VALUES ('clubs', 1000);
     INSERT INTO sqlite_sequence (name, seq) VALUES ('club_invites', 5000);
     )",
+    // 8: club accolade progress (the members' contributions, updateAccoladeProgressInTransaction
+    // entries with currentClub true), summed per club.
+    R"(
+    CREATE TABLE club_accolades (
+        club_id  INTEGER NOT NULL REFERENCES clubs (id) ON DELETE CASCADE,
+        name     TEXT NOT NULL,
+        progress INTEGER NOT NULL DEFAULT 0,
+        updated  INTEGER NOT NULL,
+        PRIMARY KEY (club_id, name)
+    );
+    )",
+    // 9: club reports (moderationService.submitClubNameReport). The club's name is kept as it was
+    // when reported, and a report outlives the club.
+    R"(
+    CREATE TABLE club_reports (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        club_id   INTEGER NOT NULL,
+        club_name TEXT NOT NULL DEFAULT '',
+        reporter  INTEGER NOT NULL,
+        language  INTEGER NOT NULL DEFAULT 0,
+        reason    INTEGER NOT NULL DEFAULT 0,
+        created   INTEGER NOT NULL
+    );
+    )",
 };
 
 QMutex& lock() {
@@ -278,6 +302,14 @@ bool open(const QString& path, QString* error) {
         q.numRowsAffected() > 0) {
         qCInfo(lcDb).noquote() << "removed" << q.numRowsAffected()
                                << "leaderboard entries stored as \"i_am_special\"";
+    }
+    // Every club has an entry on the club fame board (scores/fame/club, kind 2 = plain points);
+    // clubs made before 0.0.9 get theirs here.
+    if (q.exec(QStringLiteral(
+            "INSERT OR IGNORE INTO scores (board, entrant, score, attachment, updated) "
+            "SELECT 'fame/club', CAST(id AS TEXT), (2 << 60) | xp, '[]', created FROM clubs")) &&
+        q.numRowsAffected() > 0) {
+        qCInfo(lcDb).noquote() << "added" << q.numRowsAffected() << "clubs to the club fame board";
     }
     return true;
 }
@@ -710,6 +742,41 @@ qint64 addAccoladeProgress(qint64 accountId, const QString& name, qint64 delta) 
     return run(r, "read accolade") && r.next() ? r.value(0).toLongLong() : 0;
 }
 
+QList<Accolade> clubAccolades(qint64 clubId) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT club_id, name, progress, updated FROM club_accolades "
+                             "WHERE club_id = ? ORDER BY name"));
+    q.addBindValue(clubId);
+    QList<Accolade> out;
+    if (run(q, "read club accolades")) {
+        while (q.next()) {
+            out.append({q.value(0).toLongLong(), q.value(1).toString(), q.value(2).toLongLong(),
+                        q.value(3).toLongLong()});
+        }
+    }
+    return out;
+}
+
+qint64 addClubAccoladeProgress(qint64 clubId, const QString& name, qint64 delta) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral(
+        "INSERT INTO club_accolades (club_id, name, progress, updated) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (club_id, name) DO UPDATE SET progress = progress + excluded.progress, "
+        "updated = excluded.updated"));
+    q.addBindValue(clubId);
+    q.addBindValue(text(name));
+    q.addBindValue(delta);
+    q.addBindValue(now());
+    run(q, "save club accolade");
+    QSqlQuery r(connection());
+    r.prepare(QStringLiteral("SELECT progress FROM club_accolades WHERE club_id = ? AND name = ?"));
+    r.addBindValue(clubId);
+    r.addBindValue(text(name));
+    return run(r, "read club accolade") && r.next() ? r.value(0).toLongLong() : 0;
+}
+
 QList<qint64> accoladeAccounts() {
     QMutexLocker l(&lock());
     QSqlQuery q(connection());
@@ -1038,6 +1105,44 @@ int closeClubInvites(qint64 accountId, qint64 clubId, qint64 inviteId) {
         }
     }
     return run(q, "close club invites") ? q.numRowsAffected() : 0;
+}
+
+qint64 addClubReport(const ClubReport& r) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("INSERT INTO club_reports (club_id, club_name, reporter, language, "
+                             "reason, created) VALUES (?, ?, ?, ?, ?, ?)"));
+    q.addBindValue(r.clubId);
+    q.addBindValue(text(r.clubName));
+    q.addBindValue(r.reporter);
+    q.addBindValue(r.language);
+    q.addBindValue(r.reason);
+    q.addBindValue(r.created ? r.created : now());
+    return run(q, "add club report") ? q.lastInsertId().toLongLong() : 0;
+}
+
+QList<ClubReport> clubReports() {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("SELECT id, club_id, club_name, reporter, language, reason, created "
+                             "FROM club_reports ORDER BY created DESC, id DESC"));
+    QList<ClubReport> out;
+    if (run(q, "list club reports")) {
+        while (q.next()) {
+            out.append({q.value(0).toLongLong(), q.value(1).toLongLong(), q.value(2).toString(),
+                        q.value(3).toLongLong(), q.value(4).toLongLong(), q.value(5).toLongLong(),
+                        q.value(6).toLongLong()});
+        }
+    }
+    return out;
+}
+
+bool removeClubReport(qint64 id) {
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(QStringLiteral("DELETE FROM club_reports WHERE id = ?"));
+    q.addBindValue(id);
+    return run(q, "remove club report") && q.numRowsAffected() > 0;
 }
 
 // ---- Ghosts -----------------------------------------------------------------------------------

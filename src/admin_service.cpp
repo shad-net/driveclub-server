@@ -150,6 +150,7 @@ HttpResponse AdminService::route(const HttpRequest& request) {
     }
     if (what == QLatin1String("ghosts") && parts.size() == 3 && parts[2] == QLatin1String("data") &&
         m == "GET") {
+        // The recording itself, for saving to a file. Not counted as a game download.
         QByteArray data;
         const qint64 id = request.query.queryItemValue(QStringLiteral("id")).toLongLong();
         const auto g = db::ghost(id, &data);
@@ -205,8 +206,6 @@ HttpResponse AdminService::route(const HttpRequest& request) {
             return json(200, QJsonObject{{QStringLiteral("removed"), QString::number(id)}});
         }
     }
-    // Clubs: GET lists them with members and open invites/requests, DELETE ?id= removes one
-    // (members, invites and its fame go with it).
     if (what == QLatin1String("clubs") && parts.size() == 2) {
         if (m == "GET") {
             QHash<qint64, QJsonArray> invitesByClub;
@@ -266,15 +265,43 @@ HttpResponse AdminService::route(const HttpRequest& request) {
             if (!club || !db::removeClub(id)) {
                 return error(404, QStringLiteral("no such club"));
             }
+            db::removeScore(QStringLiteral("fame/club"), QString::number(id));
             qCInfo(lcAdmin).noquote() << "removed club" << id << club->name;
+            return json(200, QJsonObject{{QStringLiteral("removed"), QString::number(id)}});
+        }
+    }
+    if (what == QLatin1String("club_reports") && parts.size() == 2) {
+        if (m == "GET") {
+            QJsonArray out;
+            for (const db::ClubReport& r : db::clubReports()) {
+                const auto club = db::club(r.clubId);
+                out.append(QJsonObject{
+                    {QStringLiteral("id"), QString::number(r.id)},
+                    {QStringLiteral("club_id"), QString::number(r.clubId)},
+                    {QStringLiteral("club_name"), r.clubName},
+                    {QStringLiteral("club_now"), club ? club->name : QString()},
+                    {QStringLiteral("club_exists"), bool(club)},
+                    {QStringLiteral("reporter_id"), QString::number(r.reporter)},
+                    {QStringLiteral("reporter"), egsPlayerName(r.reporter)},
+                    {QStringLiteral("reason"), double(r.reason)},
+                    {QStringLiteral("language"), double(r.language)},
+                    {QStringLiteral("created"), double(r.created)},
+                });
+            }
+            return json(200, out);
+        }
+        if (m == "DELETE") {
+            const qint64 id = request.query.queryItemValue(QStringLiteral("id")).toLongLong();
+            if (!db::removeClubReport(id)) {
+                return error(404, QStringLiteral("no such report"));
+            }
+            qCInfo(lcAdmin).noquote() << "dismissed club report" << id;
             return json(200, QJsonObject{{QStringLiteral("removed"), QString::number(id)}});
         }
     }
     if (what == QLatin1String("challenges") && parts.size() == 2 && m == "GET") {
         return json(200, otgChallenges());
     }
-    // Featured (Community / Evo) challenges. POST {id, list: community|evo, extend_days};
-    // DELETE ?id=&list=.
     if (what == QLatin1String("challenges") && parts.size() == 3 &&
         parts.at(2) == QLatin1String("feature")) {
         if (m == "POST") {
@@ -327,6 +354,7 @@ HttpResponse AdminService::route(const HttpRequest& request) {
                                    {QStringLiteral("version"), g.version},
                                    {QStringLiteral("updated"), double(g.updated)}});
         }
+        // Accolade progress (objectiveService) is shown as one more set.
         for (const qint64 account : db::accoladeAccounts()) {
             bool listed = false;
             for (const QJsonValue& v : out) {
@@ -409,6 +437,7 @@ HttpResponse AdminService::route(const HttpRequest& request) {
     }
     if (what == QLatin1String("players") && parts.size() == 3 &&
         parts[2] == QLatin1String("fame") && (m == "POST" || m == "PUT")) {
+        // {"account_id": "1839021443", "xp": 10619}: sets the fame exactly (may lower it).
         const QJsonObject o = QJsonDocument::fromJson(request.body).object();
         const qint64 account = o.value(QStringLiteral("account_id")).toVariant().toLongLong();
         const QJsonValue xpValue = o.value(QStringLiteral("xp"));

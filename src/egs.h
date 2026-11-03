@@ -7,6 +7,7 @@
 
 #include <QByteArray>
 #include <QList>
+#include <QMap>
 #include <QString>
 
 #include <optional>
@@ -17,6 +18,19 @@ struct EgsConfig {
     QString serverIdentifier = QStringLiteral("dc-community");
     QString version = QStringLiteral("1");
     bool friendLists = true;
+    QMap<QString, QStringList> clubKeywords = {
+        {QStringLiteral("KW_CLUB_GROUP_01"),
+         {QStringLiteral("Casual"), QStringLiteral("Competitive"), QStringLiteral("Hardcore"),
+          QStringLiteral("Friendly"), QStringLiteral("Beginners Welcome"),
+          QStringLiteral("Veterans")}},
+        {QStringLiteral("KW_CLUB_GROUP_02"),
+         {QStringLiteral("Racing"), QStringLiteral("Drifting"), QStringLiteral("Time Trials"),
+          QStringLiteral("Challenges"), QStringLiteral("Tours"), QStringLiteral("Face-Offs")}},
+        {QStringLiteral("KW_CLUB_GROUP_03"),
+         {QStringLiteral("Europe"), QStringLiteral("North America"),
+          QStringLiteral("South America"), QStringLiteral("Asia"), QStringLiteral("Oceania"),
+          QStringLiteral("Africa")}},
+    };
 };
 
 void setEgsConfig(const EgsConfig& config);

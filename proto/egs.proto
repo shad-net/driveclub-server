@@ -739,3 +739,12 @@ message MsgClubProgressionChange {
   optional int64 club = 1;
   optional int64 account = 2;
 }
+
+// ---- moderationService.submitClubNameReport ----------------------------------------------
+
+message ClubReportRequest {
+  optional int64 reporterAccountId = 1;
+  optional int64 entityId = 2;
+  optional int64 reportLanguageId = 3;
+  optional int64 reportReasonId = 4;
+}

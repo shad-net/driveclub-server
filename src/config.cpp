@@ -108,6 +108,29 @@ std::optional<Config> loadConfig(const QByteArray& json, QString* error) {
     if (egs.contains("version")) {
         c.egs.version = egs.value("version").toString();
     }
+    if (egs.contains("club_keywords")) {
+        // {"KW_CLUB_GROUP_01": ["Casual", ...], ...}: replaces the built-in lists.
+        const QJsonValue kw = egs.value("club_keywords");
+        if (!kw.isObject()) {
+            return failed(error,
+                          QStringLiteral("egs.club_keywords must be an object of string lists"));
+        }
+        c.egs.clubKeywords.clear();
+        const QJsonObject groups = kw.toObject();
+        for (auto it = groups.begin(); it != groups.end(); ++it) {
+            if (!it.value().isArray()) {
+                return failed(error,
+                              QStringLiteral("egs.club_keywords.%1 must be a list").arg(it.key()));
+            }
+            QStringList words;
+            for (const QJsonValue& w : it.value().toArray()) {
+                if (!w.toString().trimmed().isEmpty()) {
+                    words << w.toString().trimmed();
+                }
+            }
+            c.egs.clubKeywords.insert(it.key(), words);
+        }
+    }
     c.egs.friendLists = egs.value("friend_lists").toBool(true);
 
     const QJsonObject otg = root.value("otg").toObject();
