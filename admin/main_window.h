@@ -50,6 +50,7 @@ private:
     void deleteClub();
     void showClubReports(const QJsonArray& reports);
     void dismissClubReport();
+    void makeClubOwner();
     void showGhostUses();
     void showStatsPlayers(const QJsonObject& stats);
     void loadStatsTable();
@@ -131,6 +132,7 @@ private:
     QTableWidget* clubMemberTable_;
     QLabel* clubTitle_;
     QPushButton* deleteClub_;
+    QPushButton* makeOwner_;
     QTableWidget* clubReportTable_;
     QPushButton* dismissReport_;
     QTableWidget* ghostUses_;

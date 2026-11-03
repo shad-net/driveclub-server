@@ -778,6 +778,12 @@ void clubJoin(Context& ctx, const ClubIdRequest& req, ClubReply& resp) {
     if (const auto inv = db::clubInvite(req.id()); inv && inv->accountId == account) {
         club = inv->clubId;
     }
+    if (const auto m = account ? db::clubMember(account) : std::nullopt; m && m->clubId == club) {
+        db::closeClubInvites(account, club);
+        resp.set_id(club);
+        qCInfo(lcEgs).noquote() << me << "is already in club" << club << "(join ignored)";
+        return;
+    }
     bool invited = false;
     for (const db::ClubInvite& i : db::clubInvites()) {
         invited |= i.accountId == account && i.clubId == club && i.status == db::InviteSent &&
@@ -854,6 +860,10 @@ void clubInvite(Context& ctx, const ClubAccountsRequest& req, Empty&) {
         if (who == 0 || who == account) {
             continue;
         }
+        if (const auto them = db::clubMember(who); them && them->clubId == club) {
+            done << egsPlayerName(who) + QStringLiteral(" (already a member)");
+            continue;
+        }
         bool asked = false;
         bool pending = false;
         for (const db::ClubInvite& i : db::clubInvites()) {
@@ -895,6 +905,13 @@ void clubFindInvites(Context& ctx, const FindClubInvitesRequest& req, ClubInvite
     const int limit = req.maximumentries() > 0 ? req.maximumentries() : 20;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     for (const db::ClubInvite& i : db::clubInvites()) {
+        if (i.status != db::InviteClosed) {
+            // An open invite or request for a club the player is already in is stale: close it.
+            if (const auto m = db::clubMember(i.accountId); m && m->clubId == i.clubId) {
+                db::closeClubInvites(0, 0, i.id);
+                continue;
+            }
+        }
         if (!status.contains(i.status) || (!req.includeexpired() && i.expires <= now) ||
             (!accounts.isEmpty() && !accounts.contains(i.accountId)) ||
             (!clubs.isEmpty() && !clubs.contains(i.clubId)) || !db::club(i.clubId)) {

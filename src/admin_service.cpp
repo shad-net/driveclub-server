@@ -270,6 +270,25 @@ HttpResponse AdminService::route(const HttpRequest& request) {
             return json(200, QJsonObject{{QStringLiteral("removed"), QString::number(id)}});
         }
     }
+    // POST /api/clubs/owner?club=&account=: makes a member the club's owner
+    if (what == QLatin1String("clubs") && parts.size() == 3 && parts[2] == QLatin1String("owner") &&
+        m == "POST") {
+        const qint64 club = request.query.queryItemValue(QStringLiteral("club")).toLongLong();
+        const qint64 account = request.query.queryItemValue(QStringLiteral("account")).toLongLong();
+        const auto target = db::clubMember(account);
+        if (!db::club(club) || !target || target->clubId != club) {
+            return error(404, QStringLiteral("not a member of that club"));
+        }
+        for (db::ClubMember mem : db::clubMembers(club)) {
+            const int type = mem.accountId == account ? db::ClubOwner : db::ClubMemberType;
+            if (mem.type != type) {
+                mem.type = type;
+                db::putClubMember(mem);
+            }
+        }
+        qCInfo(lcAdmin).noquote() << "made" << egsPlayerName(account) << "owner of club" << club;
+        return json(200, QJsonObject{{QStringLiteral("owner"), QString::number(account)}});
+    }
     if (what == QLatin1String("club_reports") && parts.size() == 2) {
         if (m == "GET") {
             QJsonArray out;

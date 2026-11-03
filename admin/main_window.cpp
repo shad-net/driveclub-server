@@ -415,8 +415,12 @@ QWidget* MainWindow::buildClubsTab() {
     clubMemberTable_ = makeTable({tr("Player"), tr("Role"), tr("Joined"), tr("Account ID")});
     layout->addWidget(clubMemberTable_, 2);
     deleteClub_ = new QPushButton(tr("Delete club"));
+    makeOwner_ = new QPushButton(tr("Make owner"));
+    makeOwner_->setToolTip(
+        tr("Make the selected member the club's owner; the old owner becomes a member."));
     auto* buttons = new QHBoxLayout;
     buttons->addStretch();
+    buttons->addWidget(makeOwner_);
     buttons->addWidget(deleteClub_);
     layout->addLayout(buttons);
     layout->addWidget(new QLabel(tr("<b>Reports</b> sent with the game's \"Report club\" "
@@ -436,6 +440,9 @@ QWidget* MainWindow::buildClubsTab() {
     connect(clubTable_, &QTableWidget::itemSelectionChanged, this, &MainWindow::showClubDetails);
     connect(clubTable_, &QTableWidget::itemSelectionChanged, this, &MainWindow::updateButtons);
     connect(deleteClub_, &QPushButton::clicked, this, &MainWindow::deleteClub);
+    connect(makeOwner_, &QPushButton::clicked, this, &MainWindow::makeClubOwner);
+    connect(clubMemberTable_, &QTableWidget::itemSelectionChanged, this,
+            &MainWindow::updateButtons);
     return page;
 }
 
@@ -509,13 +516,35 @@ void MainWindow::showClubDetails() {
     clubMemberTable_->setRowCount(int(members.size()));
     for (int r = 0; r < members.size(); ++r) {
         const QJsonObject m = members.at(r).toObject();
-        clubMemberTable_->setItem(r, 0, cell(m.value("name").toString()));
+        auto* who = cell(m.value("name").toString());
+        who->setData(Qt::UserRole + 1, m.value("account_id").toString());
         clubMemberTable_->setItem(r, 1, cell(m.value("role").toString()));
         clubMemberTable_->setItem(r, 2, cell(when(m.value("joined").toDouble())));
         clubMemberTable_->setItem(r, 3, numberCell(m.value("account_id").toString().toDouble()));
     }
     clubMemberTable_->setSortingEnabled(true);
     clubMemberTable_->resizeColumnsToContents();
+}
+
+void MainWindow::makeClubOwner() {
+    const int c = selectedIndex(clubTable_);
+    const auto rows = clubMemberTable_->selectionModel()->selectedRows();
+    if (c < 0 || rows.isEmpty()) {
+        return;
+    }
+    const QString club = clubs_.at(c).toObject().value("id").toString();
+    const QString account =
+        clubMemberTable_->item(rows.first().row(), 0)->data(Qt::UserRole + 1).toString();
+    const QString name = clubMemberTable_->item(rows.first().row(), 0)->text();
+    api_.post(QStringLiteral("/api/clubs/owner?club=%1&account=%2").arg(club, account),
+              QJsonDocument(QJsonObject{}), [this, name](const ApiClient::Reply& r) {
+                  if (!r.ok()) {
+                      reportError(tr("Make owner"), r);
+                      return;
+                  }
+                  setStatus(tr("%1 is now the club's owner").arg(name));
+                  refresh();
+              });
 }
 
 void MainWindow::showClubReports(const QJsonArray& reports) {
@@ -1874,6 +1903,8 @@ void MainWindow::updateButtons() {
     deleteUnused_->setEnabled(connected_ && !ghosts_.isEmpty());
     deleteClub_->setEnabled(connected_ && selectedIndex(clubTable_) >= 0);
     dismissReport_->setEnabled(connected_ && selectedIndex(clubReportTable_) >= 0);
+    makeOwner_->setEnabled(connected_ && selectedIndex(clubTable_) >= 0 &&
+                           clubMemberTable_->selectionModel()->hasSelection());
 }
 
 void MainWindow::setStatus(const QString& text, bool error) {
