@@ -15,6 +15,7 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QHash>
+#include <QHostAddress>
 #include <QJsonObject>
 #include <QList>
 #include <QLoggingCategory>
@@ -56,6 +57,9 @@ struct Session {
     int requests = 0;
     QString transaction;
     qint64 transactionCounter = 1000;
+    QHostAddress peer;
+    qint64 lastPoll = 0;
+    QList<QPair<QByteArray, std::string>> outbox;
 };
 
 struct Sessions {
@@ -66,6 +70,79 @@ struct Sessions {
 Sessions& sessions() {
     static Sessions s;
     return s;
+}
+
+// ---- Online status (sessionService.queryStatus, SessionCallbackMessage) ------------------------
+
+constexpr qint64 OnlineTimeoutMs = 30000;
+
+struct Presence {
+    QSet<qint64> online;                  // as of the last check
+    QHash<qint64, QSet<qint64>> watchers; // account -> accounts that asked about it
+    qint64 lastCheck = 0;
+};
+
+Presence& presence() {
+    static Presence p;
+    return p;
+}
+
+// Call with sessions().mutex held.
+QSet<qint64> onlineAccountsLocked(qint64 now) {
+    QSet<qint64> out;
+    for (const Session& s : std::as_const(sessions().byKey)) {
+        if (s.accountId != 0 && s.lastPoll != 0 && now - s.lastPoll < OnlineTimeoutMs) {
+            out.insert(s.accountId);
+        }
+    }
+    return out;
+}
+
+void pushLocked(qint64 account, const QByteArray& type, const std::string& data) {
+    Session* newest = nullptr;
+    for (Session& s : sessions().byKey) {
+        if (s.accountId == account && (!newest || s.lastSeen > newest->lastSeen)) {
+            newest = &s;
+        }
+    }
+    if (newest && newest->outbox.size() < 200) {
+        newest->outbox.append(qMakePair(type, data));
+    }
+}
+
+void presenceCheckLocked(qint64 now) {
+    Presence& p = presence();
+    if (now - p.lastCheck < 2000) {
+        return;
+    }
+    p.lastCheck = now;
+    const QSet<qint64> online = onlineAccountsLocked(now);
+    auto notify = [&](qint64 account, SessionAction action) {
+        const auto it = p.watchers.constFind(account);
+        if (it == p.watchers.constEnd()) {
+            return;
+        }
+        SessionCallbackMessage m;
+        m.set_accountid(account);
+        m.set_sessionaction(action);
+        const std::string data = m.SerializeAsString();
+        for (const qint64 w : *it) {
+            if (w != account && online.contains(w)) {
+                pushLocked(w, QByteArrayLiteral("SessionCallbackMessage"), data);
+            }
+        }
+    };
+    for (const qint64 a : online) {
+        if (!p.online.contains(a)) {
+            notify(a, SESSION_ACTION_STARTED);
+        }
+    }
+    for (const qint64 a : std::as_const(p.online)) {
+        if (!online.contains(a)) {
+            notify(a, SESSION_ACTION_ENDED);
+        }
+    }
+    p.online = online;
 }
 
 // ---- Players (account id -> name) -------------------------------------------------------------
@@ -87,7 +164,6 @@ qint32 accountIdFor(const QString& name) {
     return static_cast<qint32>(v & 0x7fffffff) | 1;
 }
 
-// protobuf returns std::string in older releases and std::string_view in newer ones.
 QString qs(std::string_view s) {
     return QString::fromUtf8(s.data(), static_cast<qsizetype>(s.size()));
 }
@@ -166,7 +242,6 @@ Endpoint discoveryEndpoint(Endpoint::Discovery group, const char* service, const
 std::string endpointList();
 
 void login(Context& ctx, const OAuthLoginRequest& req, OAuthLoginResponse& resp) {
-    // A verified login uses shadNet's online id, not the name the client sent.
     const bool verified = ctx.auth.outcome == AuthResult::Outcome::Verified;
     QString name = verified ? ctx.auth.onlineId : qs(req.name());
     if (name.isEmpty()) {
@@ -181,8 +256,10 @@ void login(Context& ctx, const OAuthLoginRequest& req, OAuthLoginResponse& resp)
     s.psPlus = req.psplus();
     s.created = QDateTime::currentMSecsSinceEpoch();
     s.lastSeen = s.created;
+    s.peer = ctx.request.peer; // for matching /egs/messaging polls (online status)
     {
         QMutexLocker lock(&sessions().mutex);
+        // One session per player: drop the old key.
         for (auto it = sessions().byKey.begin(); it != sessions().byKey.end();) {
             if (it->name == name) {
                 db::removeSession(it->key);
@@ -249,9 +326,20 @@ void aggregatedProfiles(Context& ctx, const GetAggregatedProfilesRequest& req,
         if (!known) {
             id = accountIdFor(name);
         }
-        AccountRef* a = resp.add_profiles()->mutable_account();
+        AggregatedProfile* profile = resp.add_profiles();
+        AccountRef* a = profile->mutable_account();
         a->set_id(id);
         a->set_name(name.toStdString());
+        if (const auto f = db::fame(id)) {
+            AggregatedProgression* pr = profile->mutable_progression();
+            pr->set_xp(f->xp);
+            if (f->stars) {
+                pr->set_stars(*f->stars);
+            }
+            if (f->elite) {
+                pr->set_elite(*f->elite);
+            }
+        }
         found << QStringLiteral("%1=%2%3").arg(name).arg(id).arg(
             known ? QString() : QStringLiteral(" (not played yet)"));
         if (account != 0 && name.compare(me, Qt::CaseInsensitive) != 0 &&
@@ -274,10 +362,11 @@ qint64 friendAccountId(const QString& name) {
 
 void fillFriends(GetFriendsResponse& resp, const QStringList& names) {
     for (const QString& n : names) {
+        const auto known = db::playerByName(n);
         FriendAccount* a = resp.add_friends()->mutable_account();
-        a->set_id(friendAccountId(n));
-        a->set_lastseen(0); // unit unknown (seconds or ms); 0 = not seen
-        a->set_name(n.toStdString());
+        a->set_id(known ? known->accountId : accountIdFor(n));
+        a->set_lastseen(known ? std::max<qint64>(known->lastSeen, known->firstSeen) : 0);
+        a->set_name((known ? known->name : n).toStdString());
     }
 }
 
@@ -295,8 +384,12 @@ void friends(Context& ctx, const GetFriendsRequest&, GetFriendsResponse& resp) {
         }
     }
     fillFriends(resp, names);
+    int playing = 0;
+    for (const Friend& f : resp.friends()) {
+        playing += f.account().lastseen() != 0;
+    }
     qCInfo(lcEgs).noquote() << "friends of" << (me.isEmpty() ? QStringLiteral("?") : me) << "->"
-                            << names.size()
+                            << names.size() << QStringLiteral("(%1 play here)").arg(playing)
                             << (names.isEmpty() ? QString() : names.join(QStringLiteral(", ")))
                             << (config().friendLists
                                     ? QString()
@@ -341,6 +434,38 @@ void removeFriends(Context& ctx, const FriendsChangeRequest& req, GetFriendsResp
     changeFriends(ctx, req, resp, false);
 }
 
+void queryStatus(Context& ctx, const QueryStatusRequest& req, QueryStatusResponse& resp) {
+    QString me;
+    const qint64 account = sessionAccount(ctx, &me);
+    QStringList on;
+    int asked = 0;
+    {
+        QMutexLocker lock(&sessions().mutex);
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const QSet<qint64> online = onlineAccountsLocked(now);
+        for (const IdRef& a : req.accounts()) {
+            if (a.id() == 0) {
+                continue;
+            }
+            ++asked;
+            if (account != 0) {
+                presence().watchers[a.id()].insert(account);
+            }
+            if (online.contains(a.id())) {
+                resp.add_sessions()->mutable_sessionkey()->set_accountid(a.id());
+                on << QString::number(a.id());
+            }
+        }
+    }
+    QStringList names;
+    for (const QString& id : on) {
+        names << egsPlayerName(id.toLongLong());
+    }
+    qCInfo(lcEgs).noquote() << "online status for" << (me.isEmpty() ? QStringLiteral("?") : me)
+                            << ":" << names.size() << "of" << asked << "online"
+                            << (names.isEmpty() ? QString() : names.join(QStringLiteral(", ")));
+}
+
 void quickSearch(Context& ctx, const AccountQuickSearchRequest& req, AccountListResponse& resp) {
     QString me;
     sessionAccount(ctx, &me);
@@ -375,7 +500,6 @@ void timeInfo(Context&, const Empty&, GetTimeInfoResponse& resp) {
     resp.set_timestamp(QDateTime::currentMSecsSinceEpoch());
 }
 
-// The session a request was signed with, or nullptr (call with sessions().mutex held).
 Session* sessionOf(const Context& ctx) {
     auto it = sessions().byKey.find(ctx.sessionKey);
     return it == sessions().byKey.end() ? nullptr : &*it;
@@ -670,6 +794,7 @@ struct StatColumn {
     const char* counter;
 };
 
+// Per-subject sets: the category their subjects come from; all have the same six columns.
 const QList<QPair<QString, QString>>& rowSets() {
     static const QList<QPair<QString, QString>> sets = {
         {QStringLiteral("Tracks"), QStringLiteral("track")},
@@ -823,6 +948,7 @@ void accountStats(Context& ctx, const GetAccountStatsRequest& req, GetAccountSta
 
 const QList<Endpoint>& endpoints() {
     static const QList<Endpoint> list = {
+        // Registered by the game itself before it has a schema (0xA29400), so not listed.
         endpoint<Empty, gp::FileDescriptorProto>(
             "indexService", "getMessageDescriptors", false, false,
             [](Context&, const Empty&, gp::FileDescriptorProto& out) {
@@ -917,6 +1043,7 @@ const QList<Endpoint>& endpoints() {
             Endpoint::Discovery::Clubs, "clubService", "updateCustomization"),
         discoveryEndpoint<GetKeywordsRequest, GetKeywordsResponse>(Endpoint::Discovery::Clubs,
                                                                    "keywordService", "getKeywords"),
+        // Real friend lists (config.json egs.friend_lists, on by default).
         withGroup(endpoint<FriendsChangeRequest, GetFriendsResponse>(
                       "friendsListService", "addFriends", false, true, addFriends),
                   Endpoint::Discovery::FriendLists),
@@ -925,6 +1052,8 @@ const QList<Endpoint>& endpoints() {
                   Endpoint::Discovery::FriendLists),
         endpoint<AccountQuickSearchRequest, AccountListResponse>("accountService", "quickSearch",
                                                                  false, true, quickSearch),
+        endpoint<QueryStatusRequest, QueryStatusResponse>("sessionService", "queryStatus", false,
+                                                          true, queryStatus),
     };
     return list;
 }
@@ -985,6 +1114,7 @@ HttpResponse egsAnswer(const QString& method, const QByteArray& sessionKey, int 
     return r;
 }
 
+// "egs/binary/<service>/<method>" or "/egs/binary/..." -> {service, method}
 QStringList splitPath(QString path) {
     if (path.startsWith('/')) {
         path.remove(0, 1);
@@ -1137,6 +1267,30 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
         r.contentType = "text/xml";
         r.body = "<msg t=\"Empty\" s=\"0\"></msg>";
         r.keepalive = true; // counted in the trace, not logged one by one
+        {
+            QMutexLocker lock(&sessions().mutex);
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            Session* match = nullptr;
+            for (Session& s : sessions().byKey) {
+                if (!s.peer.isNull() && s.peer.isEqual(request.peer) &&
+                    (!match || s.lastSeen > match->lastSeen)) {
+                    match = &s;
+                }
+            }
+            if (match) {
+                match->lastPoll = now;
+            }
+            presenceCheckLocked(now);
+            if (match && !match->outbox.isEmpty()) {
+                const auto [type, data] = match->outbox.takeFirst();
+                const QByteArray b64 =
+                    QByteArray(data.data(), static_cast<qsizetype>(data.size())).toBase64();
+                r.body = "<msg t=\"" + type + "\" s=\"" + QByteArray::number(b64.size()) + "\">" +
+                         b64 + "</msg>";
+                r.keepalive = false; // a real message: traced like any request
+                qCInfo(lcEgs).noquote() << "pushed" << type << "to" << match->name;
+            }
+        }
         respond(r);
         return true;
     }
@@ -1150,6 +1304,13 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
     const auto found =
         egsFindSessionKey(method, request.body, request.headers.value("x-request-signature"));
     const QByteArray sessionKey = found.value_or(QByteArray());
+    if (!sessionKey.isEmpty()) {
+        QMutexLocker lock(&sessions().mutex);
+        const auto it = sessions().byKey.find(sessionKey);
+        if (it != sessions().byKey.end()) {
+            it->peer = request.peer;
+        }
+    }
 
     const Endpoint* e = findEndpoint(service, method);
     if (!e) {
@@ -1233,7 +1394,6 @@ QString egsPlayerName(qint64 accountId) {
     if (const auto p = db::player(accountId)) {
         return p->name;
     }
-    // A PSN friend who has not played here yet
     for (const QString& name : db::allFriendNames()) {
         if (accountIdFor(name) == accountId) {
             return name;

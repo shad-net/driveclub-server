@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Driveclub Custom Server Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-
 syntax = "proto2";
 
 message Empty {}
@@ -53,7 +52,7 @@ message SessionKey {
 
 message OAuthLoginResponse {
   optional SessionKey sessionkey = 1;
-  optional int32 retryHint = 2; 
+  optional int32 retryHint = 2;  // read when the login failed (0xA35106)
 }
 
 enum RetryHint {
@@ -117,12 +116,18 @@ message XpRef {
   optional int64 xp = 1;
 }
 
+message AggregatedProgression {
+  optional int64 xp = 1;
+  optional int64 stars = 2;
+  optional int64 elite = 3;
+}
+
 message AggregatedProfile {
   optional AccountRef account = 1;
-  optional IdRef club = 2;          // read only when present
-  optional XpRef progression = 3;   // read only when present
-  optional int64 stars = 4;
-  optional int64 elite = 5;
+  optional IdRef club = 2;                    // read only when present
+  optional AggregatedProgression progression = 3;  // read only when present
+  optional int64 stars = 4;                   // not read (the parser takes progression.stars)
+  optional int64 elite = 5;                   // not read (progression.elite)
   optional string fbAuthToken = 6;
 }
 
@@ -586,6 +591,7 @@ message AccoladeProgress {
   optional int64 progress = 3;
 }
 
+
 message AccoladeProgressResponse {
   repeated AccoladeProgress progressList = 1;
 }
@@ -599,4 +605,34 @@ message AccoladeProgressUpdate {
 message UpdateAccoladeProgressRequest {
   optional string transactionId = 1;
   repeated AccoladeProgressUpdate updates = 2;
+}
+
+// ---- sessionService.queryStatus: online status --------------------------------------------
+
+message QueryStatusRequest {
+  repeated IdRef accounts = 1;
+}
+
+message StatusSessionKey {
+  optional int64 accountId = 1;
+}
+
+message StatusSession {
+  optional StatusSessionKey sessionKey = 1;
+}
+
+message QueryStatusResponse {
+  repeated StatusSession sessions = 1;
+}
+
+enum SessionAction {
+  SESSION_ACTION_0 = 0;
+  SESSION_ACTION_STARTED = 1;
+  SESSION_ACTION_ENDED = 2;
+  SESSION_ACTION_3 = 3;
+}
+
+message SessionCallbackMessage {
+  optional int64 accountId = 1;
+  optional SessionAction sessionAction = 2;
 }
