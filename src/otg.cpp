@@ -58,6 +58,7 @@ QString baseUrl(const HttpRequest& request) {
     if (!host.isEmpty()) {
         return QStringLiteral("http://") + QString::fromLatin1(host);
     }
+    // HTTP/1.0 request without Host: this server's own listen port on the loopback address.
     return QStringLiteral("http://127.0.0.1:%1").arg(config().listenPort);
 }
 
@@ -114,7 +115,12 @@ QString tokenOwner(const HttpRequest& request) {
     return it->name;
 }
 
-QString callerEntrant(const HttpRequest& request) {
+bool isClubBoard(const QString& board) {
+    return board.startsWith(QLatin1String("challenges/club/")) ||
+           board == QLatin1String("fame/club");
+}
+
+QString callerEntrant(const HttpRequest& request, const QString& board = {}) {
     const QByteArray value = request.headers.value("authorization");
     if (!value.startsWith("Bearer ")) {
         return {};
@@ -129,7 +135,15 @@ QString callerEntrant(const HttpRequest& request) {
         name = it->name;
     }
     const auto player = db::playerByName(name);
-    return player ? QString::number(player->accountId) : QString();
+    if (!player) {
+        return {};
+    }
+    if (isClubBoard(board)) {
+        // "i_am_special" on a club board is the caller's club.
+        const auto member = db::clubMember(player->accountId);
+        return member ? QString::number(member->clubId) : QString();
+    }
+    return QString::number(player->accountId);
 }
 
 const QString IAmSpecial = QStringLiteral("i_am_special");
@@ -183,11 +197,10 @@ HttpResponse readBoard(const HttpRequest& request, const QString& name) {
     QByteArray nextToken;
 
     if (method == QLatin1String("select")) {
-        // entrants=a,b,c; "i_am_special" is the caller, answered under that name.
         QStringList wanted =
             request.query.queryItemValue(QStringLiteral("entrants")).split(',', Qt::SkipEmptyParts);
         const bool special = wanted.removeAll(IAmSpecial) > 0;
-        const QString me = special ? callerEntrant(request) : QString();
+        const QString me = special ? callerEntrant(request, name) : QString();
         for (qsizetype i = 0; i < list.size(); ++i) {
             if (!me.isEmpty() && list.at(i).entrant == me) {
                 QJsonObject row = entryJson(list.at(i), i + 1);
@@ -201,7 +214,7 @@ HttpResponse readBoard(const HttpRequest& request, const QString& name) {
     } else if (method == QLatin1String("nearby")) {
         QString who = request.query.queryItemValue(QStringLiteral("entrant"));
         if (who == IAmSpecial) {
-            who = callerEntrant(request);
+            who = callerEntrant(request, name);
         }
         const int n = count > 0 ? count : 10;
         qsizetype at = -1;
@@ -218,6 +231,7 @@ HttpResponse readBoard(const HttpRequest& request, const QString& name) {
             }
         }
     } else {
+        // page (default): count entries from offset <from>
         const int n = count > 0 ? count : 50;
         const qsizetype from =
             std::max(0, request.query.queryItemValue(QStringLiteral("from")).toInt());
@@ -239,8 +253,6 @@ HttpResponse readBoard(const HttpRequest& request, const QString& name) {
     return r;
 }
 
-// Challenge lists: POST challenges/{player,club}/<id>/~leaderboard (no "scores/" prefix)
-
 bool isChallengeList(const QString& resource) {
     return resource.startsWith(QLatin1String("challenges/player/")) ||
            resource.startsWith(QLatin1String("challenges/club/"));
@@ -260,7 +272,7 @@ HttpResponse writeBoard(const HttpRequest& request, const QString& name, bool la
         e.attachment = o.value(QStringLiteral("attachment")).toArray();
         e.updated = QDateTime::currentMSecsSinceEpoch();
         if (e.entrant == IAmSpecial) {
-            e.entrant = callerEntrant(request);
+            e.entrant = callerEntrant(request, name);
             if (e.entrant.isEmpty()) {
                 qCWarning(lcOtg).noquote() << "score" << name
                                            << "for i_am_special from an unknown "
@@ -544,9 +556,13 @@ QJsonArray otgChallenges() {
             info.ends = std::max(info.ends, qint64(e.score >> 8));
             info.updated = std::max(info.updated, e.updated);
             const qint64 flags = qint64(e.score & 0xff);
+            const auto ownerClub = parts.value(1) == QLatin1String("club")
+                                       ? db::club(owner.toLongLong())
+                                       : std::nullopt;
             info.members.append(QJsonObject{
                 {QStringLiteral("account_id"), owner},
-                {QStringLiteral("name"), egsPlayerName(owner.toLongLong())},
+                {QStringLiteral("name"), ownerClub ? QStringLiteral("club %1").arg(ownerClub->name)
+                                                   : egsPlayerName(owner.toLongLong())},
                 {QStringLiteral("flags"), flags},
                 {QStringLiteral("updated"), double(e.updated)},
             });
@@ -558,7 +574,7 @@ QJsonArray otgChallenges() {
     QJsonArray out;
     for (auto it = byId.constBegin(); it != byId.constEnd(); ++it) {
         if (it->scope.isEmpty()) {
-            continue;
+            continue; // only a featured copy is left (the players' lists were cleared)
         }
         const QString board = QStringLiteral("challenges/%1/%2").arg(it->scope, it.key());
         const QList<Entry> times = db::boardScores(board);
@@ -579,8 +595,12 @@ QJsonArray otgChallenges() {
         if (!times.isEmpty()) {
             o.insert(QStringLiteral("best"), QString::number(times.first().score));
             o.insert(QStringLiteral("best_entrant"), times.first().entrant);
+            const auto bestClub = it->scope == QLatin1String("club")
+                                      ? db::club(times.first().entrant.toLongLong())
+                                      : std::nullopt;
             o.insert(QStringLiteral("best_name"),
-                     egsPlayerName(times.first().entrant.toLongLong()));
+                     bestClub ? QStringLiteral("club %1").arg(bestClub->name)
+                              : egsPlayerName(times.first().entrant.toLongLong()));
         }
         out.append(o);
     }
