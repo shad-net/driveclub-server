@@ -516,35 +516,17 @@ void MainWindow::showClubDetails() {
     clubMemberTable_->setRowCount(int(members.size()));
     for (int r = 0; r < members.size(); ++r) {
         const QJsonObject m = members.at(r).toObject();
-        auto* who = cell(m.value("name").toString());
-        who->setData(Qt::UserRole + 1, m.value("account_id").toString());
+        const QString name = m.value("name").toString();
+        clubMemberTable_->setItem(r, 0,
+                                  cell(name.isEmpty() ? m.value("account_id").toString() : name));
         clubMemberTable_->setItem(r, 1, cell(m.value("role").toString()));
         clubMemberTable_->setItem(r, 2, cell(when(m.value("joined").toDouble())));
-        clubMemberTable_->setItem(r, 3, numberCell(m.value("account_id").toString().toDouble()));
+        auto* id = numberCell(m.value("account_id").toString().toDouble());
+        id->setData(Qt::UserRole + 1, m.value("account_id").toString());
+        clubMemberTable_->setItem(r, 3, id);
     }
     clubMemberTable_->setSortingEnabled(true);
     clubMemberTable_->resizeColumnsToContents();
-}
-
-void MainWindow::makeClubOwner() {
-    const int c = selectedIndex(clubTable_);
-    const auto rows = clubMemberTable_->selectionModel()->selectedRows();
-    if (c < 0 || rows.isEmpty()) {
-        return;
-    }
-    const QString club = clubs_.at(c).toObject().value("id").toString();
-    const QString account =
-        clubMemberTable_->item(rows.first().row(), 0)->data(Qt::UserRole + 1).toString();
-    const QString name = clubMemberTable_->item(rows.first().row(), 0)->text();
-    api_.post(QStringLiteral("/api/clubs/owner?club=%1&account=%2").arg(club, account),
-              QJsonDocument(QJsonObject{}), [this, name](const ApiClient::Reply& r) {
-                  if (!r.ok()) {
-                      reportError(tr("Make owner"), r);
-                      return;
-                  }
-                  setStatus(tr("%1 is now the club's owner").arg(name));
-                  refresh();
-              });
 }
 
 void MainWindow::showClubReports(const QJsonArray& reports) {
@@ -602,6 +584,27 @@ void MainWindow::dismissClubReport() {
                     setStatus(tr("Report dismissed"));
                     refresh();
                 });
+}
+
+void MainWindow::makeClubOwner() {
+    const int c = selectedIndex(clubTable_);
+    const auto rows = clubMemberTable_->selectionModel()->selectedRows();
+    if (c < 0 || rows.isEmpty()) {
+        return;
+    }
+    const QString club = clubs_.at(c).toObject().value("id").toString();
+    const QString account =
+        clubMemberTable_->item(rows.first().row(), 3)->data(Qt::UserRole + 1).toString();
+    const QString name = clubMemberTable_->item(rows.first().row(), 0)->text();
+    api_.post(QStringLiteral("/api/clubs/owner?club=%1&account=%2").arg(club, account),
+              QJsonDocument(QJsonObject{}), [this, name](const ApiClient::Reply& r) {
+                  if (!r.ok()) {
+                      reportError(tr("Make owner"), r);
+                      return;
+                  }
+                  setStatus(tr("%1 is now the club's owner").arg(name));
+                  refresh();
+              });
 }
 
 void MainWindow::deleteClub() {
@@ -1558,6 +1561,7 @@ void MainWindow::appendTraffic(const QJsonArray& requests) {
         trafficTable_->setItem(row, 2, cell(r.value("method").toString()));
         const QString label = r.value("label").toString();
         trafficTable_->setItem(row, 3, cell(label.isEmpty() ? tr("(unknown)") : label));
+        // An expected status (e.g. 404 = gamestate not stored yet) is not an error.
         const bool error = status >= 400 && !r.value("expected").toBool();
         auto* statusItem = cell(QString::number(status));
         statusItem->setData(Qt::UserRole + 1, error);
