@@ -249,6 +249,7 @@ constexpr char PlayerColumns[] =
     "account_id, name, logged_in, shadnet_account, first_seen, last_seen";
 constexpr char ScoreColumns[] = "board, entrant, score, attachment, updated";
 
+// A null QString binds as SQL NULL; every text column is NOT NULL, so bind "" instead.
 QString text(const QString& s) {
     return s.isNull() ? QStringLiteral("") : s;
 }
@@ -417,11 +418,53 @@ QList<Score> boardScores(const QString& board) {
     return out;
 }
 
+QList<EntrantScore> entrantScores(const QString& entrant) {
+    QList<EntrantScore> out;
+    QMutexLocker l(&lock());
+    QSqlQuery q(connection());
+    q.prepare(
+        QStringLiteral("SELECT s.board, s.entrant, s.score, s.attachment, s.updated, "
+                       "(SELECT COUNT(*) FROM scores t WHERE t.board = s.board AND "
+                       "(t.score > s.score OR (t.score = s.score AND t.updated < s.updated))) + 1, "
+                       "(SELECT COUNT(*) FROM scores t WHERE t.board = s.board) "
+                       "FROM scores s WHERE s.entrant = ? ORDER BY s.updated DESC"));
+    q.addBindValue(text(entrant));
+    if (run(q, "read entrant scores")) {
+        while (q.next()) {
+            out.append({scoreFrom(q), q.value(5).toLongLong(), q.value(6).toLongLong()});
+        }
+    }
+    return out;
+}
+
+Activity activitySince(qint64 since) {
+    Activity a;
+    QMutexLocker l(&lock());
+    auto count = [since](const char* sql) -> qint64 {
+        QSqlQuery q(connection());
+        q.prepare(QString::fromLatin1(sql));
+        q.addBindValue(since);
+        return run(q, "read activity") && q.next() ? q.value(0).toLongLong() : 0;
+    };
+    a.newPlayers = count("SELECT COUNT(*) FROM players WHERE first_seen >= ?");
+    a.logins = count("SELECT COUNT(*) FROM players WHERE logged_in = 1 AND last_seen >= ?");
+    a.races =
+        count("SELECT COUNT(*) FROM scores WHERE board LIKE 'eventhistory/%' AND updated >= ?");
+    a.scorePosts = count("SELECT COUNT(*) FROM scores WHERE updated >= ? AND board NOT LIKE "
+                         "'eventhistory/%' AND NOT (board LIKE 'challenges/%' AND board NOT LIKE "
+                         "'%h%m%s%') AND board NOT LIKE 'fame/%'");
+    a.challenges = count("SELECT COUNT(*) FROM scores WHERE updated >= ? AND (board LIKE "
+                         "'challenges/player/%' OR board LIKE 'challenges/club/%') AND board NOT "
+                         "LIKE '%h%m%s%' AND (score & 255) = 1");
+    a.clubsCreated = count("SELECT COUNT(*) FROM clubs WHERE created >= ?");
+    a.ghosts = count("SELECT COUNT(*) FROM ghosts WHERE created >= ?");
+    return a;
+}
+
 QList<Score> scoresWithGhosts() {
     QList<Score> out;
     QMutexLocker l(&lock());
     QSqlQuery q(connection());
-    // "ghost:-1" is the game's "no ghost"; the caller parses the id.
     q.prepare(QStringLiteral("SELECT %1 FROM scores WHERE attachment LIKE '%ghost:%' "
                              "AND attachment NOT LIKE '%ghost:-%'")
                   .arg(QLatin1String(ScoreColumns)));

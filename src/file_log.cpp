@@ -3,6 +3,7 @@
 
 #include "file_log.h"
 
+#include <QDateTime>
 #include <QFile>
 #include <QMutex>
 #include <QMutexLocker>
@@ -52,7 +53,42 @@ void handler(QtMsgType type, const QMessageLogContext& context, const QString& m
     log.file.flush();
 }
 
+struct WarningLog {
+    QMutex mutex;
+    QList<LoggedWarning> lines;
+    QtMessageHandler previous = nullptr;
+};
+
+WarningLog& warnings() {
+    static WarningLog w;
+    return w;
+}
+
+void warningHandler(QtMsgType type, const QMessageLogContext& context, const QString& message) {
+    WarningLog& w = warnings();
+    if (type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg) {
+        QMutexLocker lock(&w.mutex);
+        w.lines.append({QDateTime::currentMSecsSinceEpoch(),
+                        QString::fromLatin1(context.category ? context.category : ""), message});
+        while (w.lines.size() > 50) {
+            w.lines.removeFirst();
+        }
+    }
+    if (w.previous) {
+        w.previous(type, context, message);
+    }
+}
+
 } // namespace
+
+void startWarningCapture() {
+    warnings().previous = qInstallMessageHandler(warningHandler);
+}
+
+QList<LoggedWarning> recentWarnings() {
+    QMutexLocker lock(&warnings().mutex);
+    return warnings().lines;
+}
 
 bool startFileLog(const QString& path, qint64 maxBytes, QString* error) {
     FileLog& log = state();

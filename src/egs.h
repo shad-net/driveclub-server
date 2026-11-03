@@ -6,8 +6,10 @@
 #include "http_server.h"
 
 #include <QByteArray>
+#include <QHash>
 #include <QList>
 #include <QMap>
+#include <QSet>
 #include <QString>
 
 #include <optional>
@@ -34,7 +36,6 @@ struct EgsConfig {
 };
 
 void setEgsConfig(const EgsConfig& config);
-
 QByteArray egsSignature(const QString& method, const QByteArray& sessionKey,
                         const QByteArray& body);
 std::optional<QByteArray> egsFindSessionKey(const QString& method, const QByteArray& body,
@@ -60,6 +61,20 @@ QList<EgsSessionInfo> egsSessions();
 bool egsDropSession(const QString& key);
 void egsRestoreSessions();
 
+struct EgsPartyMember {
+    qint64 accountId = 0;
+    QString name;
+    bool host = false;
+};
+struct EgsPartyInfo {
+    QString id;
+    int type = 1;
+    int status = 0;
+    QList<EgsPartyMember> members;
+};
+QList<EgsPartyInfo> egsParties();
+QSet<qint64> egsOnlineAccounts();
+QHash<qint64, qint64> egsLastPolls();
 struct EgsPlayerInfo {
     qint64 accountId = 0;
     QString name;
@@ -69,7 +84,12 @@ QList<EgsPlayerInfo> egsPlayers();
 void egsSetPlayerName(qint64 accountId, const QString& name);
 QString egsPlayerName(qint64 accountId);
 void egsSetFame(qint64 accountId, qint64 xp);
-
+void egsSetStarsElite(qint64 accountId, std::optional<qint64> stars, std::optional<qint64> elite);
+QString egsSetClubFame(qint64 clubId, qint64 xp);
+QString egsRenameClub(qint64 clubId, const QString& name);
+QString egsRemoveClubMember(qint64 clubId, qint64 accountId);
+QString egsKickFromParty(const QString& partyId, qint64 accountId);
+QString egsDisbandParty(const QString& partyId);
 struct EgsStatsTable {
     QStringList columns;
     QList<QPair<QString, QList<qint64>>> rows;
@@ -78,6 +98,6 @@ struct EgsStatsTable {
 };
 QStringList egsStatSets();
 EgsStatsTable egsStats(qint64 accountId, const QString& set);
-
+EgsStatsTable egsClubStats(qint64 clubId, const QString& set);
 bool handleEgs(const HttpRequest& request, const QString& endpoint,
                const HttpServer::Responder& respond);

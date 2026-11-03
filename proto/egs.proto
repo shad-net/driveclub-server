@@ -270,13 +270,18 @@ message GetRemoteUrlResponse {
 }
 
 // ---- statsService.getAccountStats ---------------------------------------------------------------
-
 message GetAccountStatsRequest {
   optional string columnDefinitionSetName = 1;
   optional bool currentAccount = 2;
   repeated IdRef accounts = 3;
   optional bool currentClub = 4;
   repeated IdRef clubs = 5;
+}
+
+message GetClubStatsRequest {
+  optional string columnDefinitionSetName = 1;
+  optional bool currentClub = 2;
+  repeated int64 clubs = 3;
 }
 
 message StatDefinition {
@@ -568,6 +573,7 @@ message GetAccoladeProgressRequest {
   optional int64 accountId = 4;
 }
 
+// Builder 0x6359A0, the same with currentClub and clubId.
 message GetClubAccoladeProgressRequest {
   optional bool currentClub = 1;
   optional int64 accoladeId = 2;
@@ -591,7 +597,6 @@ message AccoladeProgress {
   optional AccoladeType type = 2;
   optional int64 progress = 3;
 }
-
 
 message AccoladeProgressResponse {
   repeated AccoladeProgress progressList = 1;
@@ -747,4 +752,136 @@ message ClubReportRequest {
   optional int64 entityId = 2;
   optional int64 reportLanguageId = 3;
   optional int64 reportReasonId = 4;
+}
+
+// ---- lobbyService: parties (lobbyType 1) ---------------------------------------------------
+
+enum LobbyValue {
+  LOBBY_VALUE_0 = 0;
+  LOBBY_VALUE_1 = 1;
+  LOBBY_VALUE_2 = 2;
+  LOBBY_VALUE_3 = 3;
+  LOBBY_VALUE_4 = 4;
+  LOBBY_VALUE_5 = 5;
+  LOBBY_VALUE_6 = 6;
+  LOBBY_VALUE_7 = 7;
+  LOBBY_VALUE_8 = 8;
+  LOBBY_VALUE_9 = 9;
+  LOBBY_VALUE_10 = 10;
+  LOBBY_VALUE_11 = 11;
+  LOBBY_VALUE_12 = 12;
+  LOBBY_VALUE_13 = 13;
+  LOBBY_VALUE_14 = 14;
+  LOBBY_VALUE_15 = 15;
+  LOBBY_VALUE_16 = 16;
+  LOBBY_VALUE_17 = 17;
+  LOBBY_VALUE_18 = 18;
+  LOBBY_VALUE_19 = 19;
+  LOBBY_VALUE_20 = 20;
+  LOBBY_VALUE_21 = 21;
+  LOBBY_VALUE_22 = 22;
+  LOBBY_VALUE_23 = 23;
+  LOBBY_VALUE_24 = 24;
+  LOBBY_VALUE_25 = 25;
+  LOBBY_VALUE_26 = 26;
+  LOBBY_VALUE_27 = 27;
+  LOBBY_VALUE_28 = 28;
+  LOBBY_VALUE_29 = 29;
+  LOBBY_VALUE_30 = 30;
+  LOBBY_VALUE_31 = 31;
+}
+
+message LobbySessionKey {
+  optional int64 accountId = 1;
+  optional string username = 2;
+}
+
+message LobbyMember {
+  optional LobbySessionKey sessionKey = 1;
+  optional bool host = 2;
+  optional int32 team = 3;
+  optional bytes contentRestriction = 4;
+}
+
+message Lobby {
+  optional string id = 1;
+  optional LobbyValue lobbyType = 2;
+  optional LobbyValue status = 3;
+  optional int64 matchSlotId = 4;
+  repeated LobbyMember membersList = 5;
+  optional int64 eventListId = 6;
+}
+
+message LobbiesResponse {
+  repeated Lobby lobbies = 1;
+}
+
+message LobbyRef {
+  optional LobbyValue lobbyType = 1;
+  optional string id = 2;
+  optional LobbyValue status = 3;
+  optional int64 matchSlotId = 4;
+}
+
+message LobbyMemberDetails {
+  optional LobbySessionKey sessionKey = 1;
+  optional bytes contentRestriction = 2;
+}
+
+message LobbyWithMemberRequest {
+  optional LobbyRef lobby = 1;
+  optional LobbyMemberDetails member = 2;
+}
+
+message LobbyJoinWithAccountRequest {
+  optional LobbyValue type = 1;
+  optional AccountRef accountToJoin = 2;
+  optional LobbyMemberDetails extraJoinDetails = 3;
+}
+
+message LobbyLeaveCurrentRequest {
+  optional LobbyValue lobbyType = 1;
+  optional bool migrateIfPartyLeader = 2;
+}
+
+message LobbyLeaveByIdRequest {
+  optional string lobbyId = 1;
+  optional bool migrateIfPartyLeader = 2;
+}
+
+message LobbyNotRemoved {
+  optional LobbySessionKey sessionKey = 1;
+}
+
+message LobbyLeaveByIdResponse {
+  repeated LobbyNotRemoved notRemoved = 1;
+}
+
+message LobbyLeaveResult {
+  repeated LobbyNotRemoved notRemoved = 1;
+}
+
+message LobbyLeaveCurrentResponse {
+  repeated LobbyLeaveResult results = 1;
+}
+
+message LobbyRemoveRequest {
+  optional int64 accountId = 1;
+  optional string lobbyId = 2;
+}
+
+message LobbyChangeHostRequest {
+  optional LobbyRef lobby = 1;
+  optional IdRef newHost = 2;
+}
+
+message LobbyUpdatedMember {
+  optional LobbySessionKey sessionKey = 1;
+}
+
+message LobbyCallbackMessage {
+  optional LobbyValue action = 1;
+  optional Lobby lobby = 2;
+  optional int64 oldMatchSlotId = 3;
+  repeated LobbyUpdatedMember updatedMembers = 4;
 }

@@ -58,7 +58,6 @@ QString baseUrl(const HttpRequest& request) {
     if (!host.isEmpty()) {
         return QStringLiteral("http://") + QString::fromLatin1(host);
     }
-    // HTTP/1.0 request without Host: this server's own listen port on the loopback address.
     return QStringLiteral("http://127.0.0.1:%1").arg(config().listenPort);
 }
 
@@ -139,7 +138,6 @@ QString callerEntrant(const HttpRequest& request, const QString& board = {}) {
         return {};
     }
     if (isClubBoard(board)) {
-        // "i_am_special" on a club board is the caller's club.
         const auto member = db::clubMember(player->accountId);
         return member ? QString::number(member->clubId) : QString();
     }
@@ -231,7 +229,6 @@ HttpResponse readBoard(const HttpRequest& request, const QString& name) {
             }
         }
     } else {
-        // page (default): count entries from offset <from>
         const int n = count > 0 ? count : 50;
         const qsizetype from =
             std::max(0, request.query.queryItemValue(QStringLiteral("from")).toInt());
@@ -431,6 +428,7 @@ bool handleOtg(const HttpRequest& request, const QString& endpoint,
         return true;
     }
 
+    // OTG services: <zone>/<serverIdentifier>/v01/<resource> (built at 0x8B5B59).
     static const QRegularExpression service(QStringLiteral("^([^/]+)/([^/]+)/(v\\d+)/(.+)$"));
     const auto m = service.match(endpoint);
     if (!m.hasMatch()) {
@@ -528,6 +526,7 @@ QJsonArray otgChallenges() {
         QJsonArray attachment;
         qint64 updated = 0;
         QJsonArray featured;
+        QString creatorClub;
     };
     QMap<QString, Info> byId;
     for (const db::BoardInfo& b : db::boards()) {
@@ -536,6 +535,7 @@ QJsonArray otgChallenges() {
         }
         const QStringList parts = b.name.split('/');
         const QString owner = parts.value(2);
+        // challenges/{community,evo}/{player,club}: featured copies, not a player's list.
         const QString featuredList = featuredListOf(b.name);
         if (!featuredList.isEmpty()) {
             for (const Entry& e : db::boardScores(b.name)) {
@@ -569,12 +569,15 @@ QJsonArray otgChallenges() {
             if (flags & 1 || info.attachment.isEmpty()) {
                 info.attachment = e.attachment;
             }
+            if ((flags & 1) && ownerClub) {
+                info.creatorClub = ownerClub->name;
+            }
         }
     }
     QJsonArray out;
     for (auto it = byId.constBegin(); it != byId.constEnd(); ++it) {
         if (it->scope.isEmpty()) {
-            continue; // only a featured copy is left (the players' lists were cleared)
+            continue;
         }
         const QString board = QStringLiteral("challenges/%1/%2").arg(it->scope, it.key());
         const QList<Entry> times = db::boardScores(board);
@@ -584,6 +587,8 @@ QJsonArray otgChallenges() {
             {QStringLiteral("creator_account"), it->creator},
             {QStringLiteral("creator_name"),
              it->creator.isEmpty() ? QString() : egsPlayerName(it->creator.toLongLong())},
+            {QStringLiteral("kind"), it->scope}, // "player" or "club"
+            {QStringLiteral("creator_club"), it->creatorClub},
             {QStringLiteral("ends"), double(it->ends)}, // game clock, ms
             {QStringLiteral("members"), it->members},
             {QStringLiteral("attachment"), it->attachment},
@@ -679,9 +684,18 @@ std::optional<QJsonArray> otgBoardEntries(const QString& name) {
     QJsonArray out;
     int rank = 0;
     for (const Entry& e : list) {
+        QString who;
+        if (isClubBoard(name)) {
+            const auto club = db::club(e.entrant.toLongLong());
+            who = club ? QStringLiteral("club %1").arg(club->name)
+                       : QStringLiteral("club %1").arg(e.entrant);
+        } else if (!e.entrant.contains(QLatin1Char('h'))) {
+            who = egsPlayerName(e.entrant.toLongLong());
+        }
         out.append(QJsonObject{
             {QStringLiteral("rank"), ++rank},
             {QStringLiteral("entrant"), e.entrant},
+            {QStringLiteral("name"), who},
             {QStringLiteral("score"), QString::number(e.score)},
             {QStringLiteral("attachment"), e.attachment},
             {QStringLiteral("updated"), double(e.updated)},

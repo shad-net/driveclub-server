@@ -40,6 +40,7 @@ struct Score {
     QJsonArray attachment;
     qint64 updated = 0; // ms since epoch; earlier wins a tie
 };
+
 QList<Score> boardScores(const QString& board);
 qsizetype boardSize(const QString& board);
 std::optional<Score> score(const QString& board, const QString& entrant);
@@ -47,6 +48,24 @@ bool putScore(const Score& score); // insert or replace
 bool removeScore(const QString& board, const QString& entrant);
 bool clearBoard(const QString& board);
 QList<Score> scoresWithGhosts();
+struct EntrantScore {
+    Score score;
+    qint64 rank = 0;
+    qint64 boardSize = 0;
+};
+QList<EntrantScore> entrantScores(const QString& entrant);
+
+// What happened since a time (ms since epoch), for the admin overview.
+struct Activity {
+    qint64 newPlayers = 0; // first seen since
+    qint64 logins = 0;     // players whose last login is since
+    qint64 races = 0;      // eventhistory entries (one per race the game reported)
+    qint64 scorePosts = 0; // leaderboard entries set or improved (not event history or lists)
+    qint64 challenges = 0; // challenges created (creator's list entry, flags 1)
+    qint64 clubsCreated = 0;
+    qint64 ghosts = 0; // ghosts uploaded
+};
+Activity activitySince(qint64 since);
 
 struct BoardInfo {
     QString name;
@@ -124,7 +143,7 @@ QList<Accolade> accolades(qint64 accountId);
 qint64 addAccoladeProgress(qint64 accountId, const QString& name, qint64 delta); // new total
 QList<qint64> accoladeAccounts();
 QList<Accolade> clubAccolades(qint64 clubId);
-qint64 addClubAccoladeProgress(qint64 clubId, const QString& name, qint64 delta);
+qint64 addClubAccoladeProgress(qint64 clubId, const QString& name, qint64 delta); // new total
 bool removeAccolades(qint64 accountId);
 
 // ---- Friends ----------------------------------------------------------------------------------
@@ -184,7 +203,6 @@ QList<ClubInvite> clubInvites(); // newest first
 std::optional<ClubInvite> clubInvite(qint64 id);
 qint64 addClubInvite(qint64 clubId, qint64 accountId, qint64 invitedBy, int status, qint64 ttlMs);
 int closeClubInvites(qint64 accountId, qint64 clubId = 0, qint64 inviteId = 0);
-// "Report club" from the game (moderationService.submitClubNameReport).
 struct ClubReport {
     qint64 id = 0;
     qint64 clubId = 0;
@@ -210,7 +228,6 @@ struct Ghost {
     int downloads = 0;
     qint64 lastDownload = 0;
 };
-
 qint64 putGhost(const Ghost& ghost, const QByteArray& data);
 std::optional<qint64> findGhost(qint64 accountId, const QString& mimeType, const QString& checksum,
                                 qint64 size);

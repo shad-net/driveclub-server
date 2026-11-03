@@ -39,6 +39,8 @@ private:
     HttpResponse route(const HttpRequest& request);
     HttpResponse status();
     HttpResponse sessions();
+    HttpResponse playerDetail(qint64 account);
+    HttpResponse activity();
     HttpResponse tokens();
     HttpResponse requests(quint64 after);
     HttpResponse setEntry(const QString& board, const QByteArray& body);

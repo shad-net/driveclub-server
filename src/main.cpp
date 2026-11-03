@@ -40,6 +40,7 @@ int main(int argc, char* argv[]) {
     QCoreApplication::setApplicationVersion(Driveclub::Version());
     qSetMessagePattern(QStringLiteral(
         "%{time yyyy-MM-dd hh:mm:ss.zzz} [%{type}] %{if-category}%{category}: %{endif}%{message}"));
+    startWarningCapture(); // the admin overview's "recent warnings"
     if (app.arguments().contains(QStringLiteral("--version")) ||
         app.arguments().contains(QStringLiteral("-v"))) {
         std::printf("driveclub-server %s (built %s)\n", qPrintable(Driveclub::Version()),
