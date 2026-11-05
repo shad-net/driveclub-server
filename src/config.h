@@ -30,6 +30,7 @@ struct Config {
     QHostAddress adminAddress = QHostAddress::LocalHost;
     quint16 adminPort = 8081;
     QString adminKey;
+    QString gameDataDir;
 };
 
 std::optional<Config> loadConfig(const QByteArray& json, QString* error);

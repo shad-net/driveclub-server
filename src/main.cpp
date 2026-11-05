@@ -7,6 +7,7 @@
 #include "database.h"
 #include "egs.h"
 #include "file_log.h"
+#include "game_data.h"
 #include "handler.h"
 #include "http_server.h"
 #include "otg.h"
@@ -109,6 +110,9 @@ int main(int argc, char* argv[]) {
     db::prune(config->sessionDays);
 
     setTraceOptions({config->trace, static_cast<qsizetype>(config->traceBodyBytes)});
+    if (!config->gameDataDir.isEmpty()) {
+        loadGameData(configDir.absoluteFilePath(config->gameDataDir));
+    }
     setEgsConfig(config->egs);
     setOtgConfig(config->otg);
     qInfo("OTG base URL (auth, gateway): %s", config->otg.baseUrl.isEmpty()
@@ -130,6 +134,7 @@ int main(int argc, char* argv[]) {
     qInfo(config->egs.friendLists
               ? "friend lists on (egs.friend_lists): each player's friends follow their PSN friends"
               : "friend lists off (egs.friend_lists): every player is everyone's friend");
+
     const QString basePath = config->basePath;
     HttpServer server([basePath](const HttpRequest& request, HttpServer::Responder reply) {
         const QString label = endpointLabel(request);

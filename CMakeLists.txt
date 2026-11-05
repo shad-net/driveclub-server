@@ -10,7 +10,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Qt6 6.10 REQUIRED COMPONENTS Core Network Sql)
 
 if(MSVC)
-    # Qt uses the DLL runtime (/MD, /MDd); protobuf must match.
     cmake_policy(SET CMP0091 NEW)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE BOOL "" FORCE)
@@ -49,6 +48,7 @@ add_executable(driveclubsrv
     src/database.cpp src/database.h
     src/egs.cpp src/egs.h
     src/file_log.cpp src/file_log.h
+    src/game_data.cpp src/game_data.h
     src/handler.cpp src/handler.h
     src/http_server.cpp src/http_server.h
     src/main.cpp

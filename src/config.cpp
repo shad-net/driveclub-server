@@ -109,7 +109,6 @@ std::optional<Config> loadConfig(const QByteArray& json, QString* error) {
         c.egs.version = egs.value("version").toString();
     }
     if (egs.contains("club_keywords")) {
-        // {"KW_CLUB_GROUP_01": ["Casual", ...], ...}: replaces the built-in lists.
         const QJsonValue kw = egs.value("club_keywords");
         if (!kw.isObject()) {
             return failed(error,
@@ -130,6 +129,14 @@ std::optional<Config> loadConfig(const QByteArray& json, QString* error) {
             }
             c.egs.clubKeywords.insert(it.key(), words);
         }
+    }
+    if (egs.contains("club_discovery")) {
+        qWarning("config: egs.club_discovery is no longer used (clubs are implemented); it can be "
+                 "removed");
+    }
+    if (egs.contains("friends_discovery")) {
+        qWarning("config: egs.friends_discovery is no longer used (friend lists and player search "
+                 "are implemented); it can be removed");
     }
     c.egs.friendLists = egs.value("friend_lists").toBool(true);
 
@@ -162,6 +169,8 @@ std::optional<Config> loadConfig(const QByteArray& json, QString* error) {
     c.auth.clientId = shadnet.value("client_id").toString();
     c.auth.allowUnverified = shadnet.value("allow_unverified").toBool(false);
 
+    c.gameDataDir = root.value("game_data").toObject().value("dir").toString().trimmed();
+
     const QJsonObject admin = root.value("admin").toObject();
     if (admin.contains("address") &&
         !c.adminAddress.setAddress(admin.value("address").toString())) {
@@ -193,7 +202,8 @@ QByteArray defaultConfigJson() {
     "otg": { "base_url": "", "domain_id": "driveclub", "zone": "eu" },
     "shadnet": { "url": "http://127.0.0.1:31315",
                  "client_id": "2a347f19-d4c4-492d-aadc-bc07ae7b8c15", "allow_unverified": false },
-    "admin": { "address": "127.0.0.1", "port": 8081, "key": "@KEY@" }
+    "admin": { "address": "127.0.0.1", "port": 8081, "key": "@KEY@" },
+    "game_data": { "dir": "" }
 }
 )");
     return json.replace("@KEY@", key.toHex());

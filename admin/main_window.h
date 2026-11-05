@@ -5,6 +5,7 @@
 
 #include "api_client.h"
 
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QMainWindow>
@@ -49,6 +50,10 @@ private:
     void showParties(const QJsonArray& parties);
     void setPlayerTabCount(int index, const QString& name, qsizetype count);
     void addTableTools(QWidget* root);
+    void loadGameData();
+    QString codeName(const QString& code) const;
+    QString pathNames(const QString& path) const;
+    QString attachmentText(const QJsonArray& attachment) const;
     void exportCsv(QTableWidget* table);
     void showPlayers(const QJsonArray& players);
     void showCounters(const QJsonArray& counters);
@@ -105,6 +110,9 @@ private:
     QJsonArray ghosts_;
     QJsonArray clubs_;
     QJsonArray parties_;
+    QHash<QString, QString> trackNames_;    // track code -> name (game data)
+    QHash<QString, QString> vehicleByCode_; // car code -> name
+    QHash<QString, QString> vehicleById_;   // car UniqueID -> name
     QJsonArray clubReports_;
     QJsonArray statsPlayers_;
     QJsonArray challenges_;
