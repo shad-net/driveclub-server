@@ -200,12 +200,8 @@ HttpResponse readBoard(const HttpRequest& request, const QString& name) {
         const bool special = wanted.removeAll(IAmSpecial) > 0;
         const QString me = special ? callerEntrant(request, name) : QString();
         for (qsizetype i = 0; i < list.size(); ++i) {
-            if (!me.isEmpty() && list.at(i).entrant == me) {
-                QJsonObject row = entryJson(list.at(i), i + 1);
-                row.insert(QStringLiteral("entrant"),
-                           QJsonObject{{QStringLiteral("id"), IAmSpecial}});
-                out.append(row);
-            } else if (wanted.contains(list.at(i).entrant)) {
+            if ((!me.isEmpty() && list.at(i).entrant == me) ||
+                wanted.contains(list.at(i).entrant)) {
                 out.append(entryJson(list.at(i), i + 1));
             }
         }
