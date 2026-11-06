@@ -139,6 +139,13 @@ std::optional<Config> loadConfig(const QByteArray& json, QString* error) {
                  "are implemented); it can be removed");
     }
     c.egs.friendLists = egs.value("friend_lists").toBool(true);
+    if (egs.contains("solo_club_fame")) {
+        const QJsonValue v = egs.value("solo_club_fame");
+        if (!v.isDouble() || v.toDouble() < 0) {
+            return failed(error, QStringLiteral("egs.solo_club_fame must be a number >= 0"));
+        }
+        c.egs.soloClubFame = qint64(v.toDouble());
+    }
 
     const QJsonObject otg = root.value("otg").toObject();
     c.otg.baseUrl = otg.value("base_url").toString();
@@ -198,7 +205,7 @@ QByteArray defaultConfigJson() {
     "base_path": "",
     "log": { "file": "server.log", "max_size_mb": 50, "trace": true, "trace_body_bytes": 65536 },
     "database": { "file": "driveclub.db", "session_days": 30 },
-    "egs": { "server_identifier": "dc-community", "version": "1" },
+    "egs": { "server_identifier": "dc-community", "version": "1", "solo_club_fame": 150000 },
     "otg": { "base_url": "", "domain_id": "driveclub", "zone": "eu" },
     "shadnet": { "url": "http://127.0.0.1:31315",
                  "client_id": "2a347f19-d4c4-492d-aadc-bc07ae7b8c15", "allow_unverified": false },

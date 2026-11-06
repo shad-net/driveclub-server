@@ -90,7 +90,6 @@ Presence& presence() {
     return p;
 }
 
-// Call with sessions().mutex held.
 QSet<qint64> onlineAccountsLocked(qint64 now) {
     QSet<qint64> out;
     for (const Session& s : std::as_const(sessions().byKey)) {
@@ -101,7 +100,6 @@ QSet<qint64> onlineAccountsLocked(qint64 now) {
     return out;
 }
 
-// Queues a message for the newest session of an account (call with sessions().mutex held).
 void pushLocked(qint64 account, const QByteArray& type, const std::string& data) {
     Session* newest = nullptr;
     for (Session& s : sessions().byKey) {
@@ -163,7 +161,6 @@ void fillLobby(::Lobby* out, const Party& p) {
     }
 }
 
-// Sends LobbyCallbackMessage{action, lobby, updatedMembers} to each account in `to`.
 void pushLobbyLocked(const Party& p, int action, const QList<qint64>& updated, QList<qint64> to) {
     LobbyCallbackMessage m;
     m.set_action(static_cast<LobbyValue>(action));
@@ -216,7 +213,6 @@ QString leavePartyLocked(qint64 account, int type, int action = LobbyLeft,
     return id;
 }
 
-// Every lobby an account is in (on going offline).
 void leaveAllPartiesLocked(qint64 account) {
     QList<int> types;
     for (auto it = parties().ofAccount.cbegin(); it != parties().ofAccount.cend(); ++it) {
@@ -226,11 +222,11 @@ void leaveAllPartiesLocked(qint64 account) {
     }
     for (const int t : types) {
         const QString id = leavePartyLocked(account, t);
+        // egsPlayerName() takes the sessions lock, so only the account id here.
         qCInfo(lcEgs).noquote() << "account" << account << "went offline: left lobby" << id;
     }
 }
 
-// Compares who is online with the last check and tells the watchers (call with the mutex held).
 void presenceCheckLocked(qint64 now) {
     Presence& p = presence();
     if (now - p.lastCheck < 2000) {
@@ -261,7 +257,6 @@ void presenceCheckLocked(qint64 now) {
     for (const qint64 a : std::as_const(p.online)) {
         if (!online.contains(a)) {
             notify(a, SESSION_ACTION_ENDED);
-            // A player who stopped polling cannot take part in a party any more.
             leaveAllPartiesLocked(a);
         }
     }
@@ -341,7 +336,6 @@ Endpoint endpoint(const char* service, const char* method, bool secure, bool lis
 std::string endpointList();
 
 void login(Context& ctx, const OAuthLoginRequest& req, OAuthLoginResponse& resp) {
-    // A verified login uses shadNet's online id, not the name the client sent.
     const bool verified = ctx.auth.outcome == AuthResult::Outcome::Verified;
     QString name = verified ? ctx.auth.onlineId : qs(req.name());
     if (name.isEmpty()) {
@@ -359,7 +353,6 @@ void login(Context& ctx, const OAuthLoginRequest& req, OAuthLoginResponse& resp)
     s.peer = ctx.request.peer; // for matching /egs/messaging polls (online status)
     {
         QMutexLocker lock(&sessions().mutex);
-        // One session per player: drop the old key.
         for (auto it = sessions().byKey.begin(); it != sessions().byKey.end();) {
             if (it->name == name) {
                 db::removeSession(it->key);
@@ -445,7 +438,6 @@ void aggregatedProfiles(Context& ctx, const GetAggregatedProfilesRequest& req,
         if (const auto m = db::clubMember(id)) {
             profile->mutable_club()->set_id(m->clubId);
         }
-
         AggregatedProgression* pr = profile->mutable_progression();
         pr->set_xp(0);
         if (const auto f = db::fame(id)) {
@@ -551,7 +543,6 @@ void removeFriends(Context& ctx, const FriendsChangeRequest& req, GetFriendsResp
     changeFriends(ctx, req, resp, false);
 }
 
-// sessionService.queryStatus: which of the asked players are online now (see "Online status").
 void queryStatus(Context& ctx, const QueryStatusRequest& req, QueryStatusResponse& resp) {
     QString me;
     const qint64 account = sessionAccount(ctx, &me);
@@ -646,7 +637,6 @@ void joinWithAccount(Context& ctx, const LobbyJoinWithAccountRequest& req, Empty
     auto it = parties().byId.find(id);
     if (account == 0 || target == 0 || id.isEmpty() || it == parties().byId.end() ||
         !online.contains(target)) {
-        // -18009: the game's "SessionMemberOfflineMessage" (error handler 0x639060).
         ctx.status = 500;
         ctx.serviceErrorCode = -18009;
         ctx.serviceError = "member offline";
@@ -669,7 +659,6 @@ void joinWithAccount(Context& ctx, const LobbyJoinWithAccountRequest& req, Empty
         it->members.append(m);
         parties().ofAccount.insert(qMakePair(account, type), id);
     }
-    // Everyone, the joiner included: the joiner's game takes its party from this push.
     pushLobbyLocked(*it, LobbyJoined, {account}, partyAccounts(*it));
     qCInfo(lcEgs).noquote() << lobbyWho(account, me) << "joined"
                             << QStringLiteral("%1's party").arg(targetName) << id << "->"
@@ -774,7 +763,6 @@ void removeFromLobby(Context& ctx, const LobbyRemoveRequest& req, Empty&) {
         if (!host || !member) {
             return; // only the party leader kicks
         }
-        // The kicked player is told too (action 14 naming them), and then leaves on its own.
         leavePartyLocked(kicked, it->type, LobbyKicked, {kicked});
     }
     qCInfo(lcEgs).noquote() << lobbyWho(account, me) << "removed" << egsPlayerName(kicked)
@@ -881,7 +869,7 @@ std::function<void(Context&, const TransactionRequest&, TransactionResponse&)> t
 }
 
 // ---- clubService
-
+// ---------------------------------------------------------------------------------
 constexpr int ClubMaxMembers = 6;
 
 void putClubFameScore(qint64 club, qint64 xp) {
@@ -899,6 +887,7 @@ QString isoTime(qint64 ms) {
         .toString(QStringLiteral("yyyy-MM-ddTHH:mm:ss.zzz+00:00"));
 }
 
+// Queues a push for an account's newest session (delivered on its next /egs/messaging poll).
 void egsPush(qint64 account, const gp::Message& m) {
     if (account == 0) {
         return;
@@ -969,6 +958,9 @@ void removeFromClub(qint64 club, qint64 account, ActivityVerb verb) {
         qCInfo(lcEgs).noquote() << egsPlayerName(next.accountId) << "is now owner of club" << club;
     }
     pushMemberChange(club, account, verb, before);
+    if (rest.size() == 1) {
+        pushClubRefresh<MsgClubProgressionChange>(club, 0);
+    }
 }
 
 // Puts a player in a club (leaving their old one). False when the club is full or gone.
@@ -989,6 +981,9 @@ bool addToClub(qint64 club, qint64 account) {
     db::putClubMember({account, club, db::ClubMemberType, false, 0});
     db::closeClubInvites(account);
     pushMemberChange(club, account, ACTIVITY_VERB_JOINED, memberIds(club));
+    if (memberIds(club).size() == 2) {
+        pushClubRefresh<MsgClubProgressionChange>(club, 0);
+    }
     return true;
 }
 
@@ -1234,7 +1229,6 @@ void clubInvite(Context& ctx, const ClubAccountsRequest& req, Empty&) {
             pending |= i.accountId == who && i.clubId == club && i.status == db::InviteSent;
         }
         if (asked) {
-            // The owner accepts a join request by inviting the player.
             done << egsPlayerName(who) + (addToClub(club, who)
                                               ? QStringLiteral(" (request accepted)")
                                               : QStringLiteral(" (club full)"));
@@ -1330,7 +1324,7 @@ void clubCustomize(Context& ctx, const UpdateCustomizationRequest& req,
     }
     ClubCustomization cu = req.customization();
     cu.set_id(club->id);
-    cu.clear_badgeboburl(); // worked out from the bob ids when asked (lookupRemoteUrl)
+    cu.clear_badgeboburl();
     cu.clear_smallbadgeboburl();
     const std::string data = cu.SerializeAsString();
     club->customization = QByteArray(data.data(), static_cast<qsizetype>(data.size()));
@@ -1397,6 +1391,8 @@ void clubKick(Context& ctx, const ClubAccountsRequest& req, Empty&) {
     if (!ct) {
         return;
     }
+    // MsgClubMemberChange verb 7 to the kicked player too: their club becomes -1
+    // ("KickedFromClub").
     removeFromClub(ct->first, ct->second, ACTIVITY_VERB_KICKED);
     qCInfo(lcEgs).noquote() << me << "kicked" << egsPlayerName(ct->second) << "from club"
                             << ct->first;
@@ -1420,6 +1416,9 @@ void clubChangeAdmin(Context& ctx, const ClubAccountsRequest& req, Empty&) {
                             << ct->first;
 }
 
+// ---- profileService: fame
+// -------------------------------------------------------------------------
+
 qint64 sessionAccount(const Context& ctx, QString* name) {
     QMutexLocker lock(&sessions().mutex);
     const Session* s = sessionOf(ctx);
@@ -1427,6 +1426,20 @@ qint64 sessionAccount(const Context& ctx, QString* name) {
         *name = s->name;
     }
     return s ? s->accountId : 0;
+}
+
+qint64 clubFameForGame(const db::Club& club) {
+    const QList<db::ClubMember> members = db::clubMembers(club.id);
+    if (members.size() >= 2) {
+        return club.xp;
+    }
+    qint64 xp = std::max(club.xp, config().soloClubFame);
+    if (members.size() == 1) {
+        if (const auto f = db::fame(members.first().accountId)) {
+            xp = std::max(xp, f->xp);
+        }
+    }
+    return xp;
 }
 
 void getFame(Context& ctx, const Empty&, GetFameResponse& resp) {
@@ -1439,12 +1452,20 @@ void getFame(Context& ctx, const Empty&, GetFameResponse& resp) {
     a->set_serverxp(0);
     a->set_stars(f.stars.value_or(0));
     a->set_elite(f.elite.value_or(0));
-    // Club fame: the sum of the members' clubFameDelta (0 without a club).
     const auto member = account ? db::clubMember(account) : std::nullopt;
     const auto club = member ? db::club(member->clubId) : std::nullopt;
-    resp.mutable_clubprogression()->set_xp(club ? club->xp : 0);
+    const qint64 clubXp = club ? clubFameForGame(*club) : 0;
+    resp.mutable_clubprogression()->set_xp(clubXp);
     qCInfo(lcEgs).noquote() << "fame of" << (name.isEmpty() ? QStringLiteral("?") : name) << "->"
-                            << (found ? QString::number(f.xp) : QStringLiteral("none stored (0)"));
+                            << (found ? QString::number(f.xp) : QStringLiteral("none stored (0)"))
+                            << (club && clubXp != club->xp
+                                    ? QStringLiteral(
+                                          "; club %1 fame %2 reported as %3 (one member: "
+                                          "driver fame or egs.solo_club_fame)")
+                                          .arg(club->id)
+                                          .arg(club->xp)
+                                          .arg(clubXp)
+                                    : QString());
 }
 
 void updateFame(Context& ctx, const UpdateFameRequest& req, UpdateFameResponse& resp) {
@@ -1463,7 +1484,6 @@ void updateFame(Context& ctx, const UpdateFameRequest& req, UpdateFameResponse& 
         }
         f.updated = QDateTime::currentMSecsSinceEpoch();
         db::putFame(f);
-        // Keep the OTG fame leaderboard (scores/fame/player) in step: kind 2 = plain points.
         const QString entrant = QString::number(account);
         const quint64 score = (quint64(2) << 60) | quint64(f.xp);
         const auto old = db::score(QStringLiteral("fame/player"), entrant);
@@ -1485,8 +1505,9 @@ void updateFame(Context& ctx, const UpdateFameRequest& req, UpdateFameResponse& 
                            .arg(member->clubId)
                            .arg(req.clubfamedelta())
                            .arg(clubXp);
-        } else if (const auto club = db::club(member->clubId)) {
-            clubXp = club->xp;
+        }
+        if (const auto club = db::club(member->clubId)) {
+            clubXp = clubFameForGame(*club);
         }
     } else if (req.clubfamedelta() > 0) {
         clubNote =
@@ -1497,6 +1518,9 @@ void updateFame(Context& ctx, const UpdateFameRequest& req, UpdateFameResponse& 
                             << "total" << sent << "-> stored" << f.xp << clubNote << "transaction"
                             << qs(req.transactionid());
 }
+
+// ---- objectiveService: accolades
+// -----------------------------------------------------------------
 
 void fillAccolades(AccoladeProgressResponse& resp, qint64 account, const QString& only) {
     for (const db::Accolade& a : db::accolades(account)) {
@@ -1654,6 +1678,9 @@ void updateAccolades(Context& ctx, const UpdateAccoladeProgressRequest& req,
                                     : QStringLiteral("| not stored: %1").arg(skipped.join(", ")));
 }
 
+// ---- storageService: ghosts
+// ----------------------------------------------------------------------
+
 QString bobChecksum(const QByteArray& data) {
     return QString::fromLatin1(QCryptographicHash::hash(data, QCryptographicHash::Md5).toBase64());
 }
@@ -1663,6 +1690,8 @@ void createBob(Context& ctx, const CreateBobRequest& req, CreateBobResponse& res
     const qint64 account = sessionAccount(ctx, &name);
     const QByteArray data(req.body().data(), static_cast<qsizetype>(req.body().size()));
     if (account == 0) {
+        // Signed with no current session (an old key after a re-login, or not a game at all):
+        // a ghost needs an owner, so refuse it like a failed upload.
         ctx.status = 500;
         qCWarning(lcEgs).noquote()
             << "ghost upload without a session refused (" << data.size() << "bytes)";
@@ -1732,6 +1761,9 @@ void getRemoteUrl(Context& ctx, const GetRemoteUrlRequest& req, GetRemoteUrlResp
                             << url;
 }
 
+// ---- statsService.getAccountStats
+// -----------------------------------------------------------------
+
 const QString StatsResource = QStringLiteral("stats/V06/player/%1");
 
 struct StatColumn {
@@ -1740,7 +1772,6 @@ struct StatColumn {
     const char* counter;
 };
 
-// Per-subject sets: the category their subjects come from; all have the same six columns.
 const QList<QPair<QString, QString>>& rowSets() {
     static const QList<QPair<QString, QString>> sets = {
         {QStringLiteral("Tracks"), QStringLiteral("track")},
@@ -1927,7 +1958,6 @@ void accountStats(Context& ctx, const GetAccountStatsRequest& req, GetAccountSta
                             << (!t.stored ? QStringLiteral("(no stats stored yet)") : QString());
 }
 
-// statsService.getClubStats: a club's stats pages, the same six column sets as a player's.
 void clubStats(Context& ctx, const GetClubStatsRequest& req, GetAccountStatsResponse& resp) {
     const QString set = qs(req.columndefinitionsetname());
     qint64 club = req.clubs_size() > 0 ? req.clubs(0) : 0;
@@ -1950,7 +1980,6 @@ void clubStats(Context& ctx, const GetClubStatsRequest& req, GetAccountStatsResp
                             << QStringLiteral("(sum of %1 member(s) with stats)").arg(members);
 }
 
-// A normal endpoint that is only listed while its group's config switch is on.
 Endpoint withGroup(Endpoint e, Endpoint::Discovery group) {
     e.discovery = group;
     return e;
@@ -2339,6 +2368,7 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
     }
     const QString service = parts.value(0);
     const QString method = parts.value(1);
+
     const auto found =
         egsFindSessionKey(method, request.body, request.headers.value("x-request-signature"));
     const QByteArray sessionKey = found.value_or(QByteArray());
@@ -2362,7 +2392,6 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
         return true;
     }
 
-    // Runs the handler and sends its answer. `request` is copied: logins finish asynchronously.
     auto run = [e, service, method, sessionKey, respond](const HttpRequest& req,
                                                          const AuthResult& auth) {
         Context ctx{req, sessionKey, {}, 200, auth};
@@ -2396,7 +2425,6 @@ bool handleEgs(const HttpRequest& request, const QString& endpoint,
         return true;
     }
 
-    // Logins: check the NP authorization code with shadNet first.
     OAuthLoginRequest login;
     login.ParseFromArray(request.body.constData(), static_cast<int>(request.body.size()));
     verifyCode(
@@ -2531,7 +2559,6 @@ QString egsRenameClub(qint64 clubId, const QString& name) {
     if (!db::updateClub(*c)) {
         return QStringLiteral("could not save the club");
     }
-    // The members re-read the club (its name is in the details the game parses).
     pushClubRefresh<MsgClubDetailsChange>(clubId, 0);
     qCInfo(lcEgs).noquote() << "club" << clubId << "renamed from" << old << "to" << wanted
                             << "(admin)";
@@ -2570,8 +2597,6 @@ QString egsDisbandParty(const QString& partyId) {
         if (it == parties().byId.cend()) {
             return QStringLiteral("no such party");
         }
-        // Everyone gets action 14 naming every member, with an empty member list: a game that is
-        // no longer in membersList leaves the party itself.
         Party empty = *it;
         const QList<qint64> members = partyAccounts(empty);
         empty.members.clear();

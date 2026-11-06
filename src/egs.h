@@ -33,6 +33,7 @@ struct EgsConfig {
           QStringLiteral("South America"), QStringLiteral("Asia"), QStringLiteral("Oceania"),
           QStringLiteral("Africa")}},
     };
+    qint64 soloClubFame = 150000;
 };
 
 void setEgsConfig(const EgsConfig& config);
