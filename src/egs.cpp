@@ -1437,12 +1437,8 @@ void getFame(Context& ctx, const Empty&, GetFameResponse& resp) {
     FameAccountProgression* a = resp.mutable_accountprogression();
     a->set_xp(f.xp);
     a->set_serverxp(0);
-    if (f.stars) {
-        a->set_stars(*f.stars);
-    }
-    if (f.elite) {
-        a->set_elite(*f.elite);
-    }
+    a->set_stars(f.stars.value_or(0));
+    a->set_elite(f.elite.value_or(0));
     // Club fame: the sum of the members' clubFameDelta (0 without a club).
     const auto member = account ? db::clubMember(account) : std::nullopt;
     const auto club = member ? db::club(member->clubId) : std::nullopt;
