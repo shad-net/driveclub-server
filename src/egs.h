@@ -34,6 +34,9 @@ struct EgsConfig {
           QStringLiteral("Africa")}},
     };
     qint64 soloClubFame = 150000;
+    QList<qint64> raceEventLists{1, 4, 5};
+    qint64 raceSlotSeconds = 300;
+    bool racePublicAddress = true;
 };
 
 void setEgsConfig(const EgsConfig& config);

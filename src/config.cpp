@@ -139,6 +139,14 @@ std::optional<Config> loadConfig(const QByteArray& json, QString* error) {
                  "are implemented); it can be removed");
     }
     c.egs.friendLists = egs.value("friend_lists").toBool(true);
+    if (egs.contains("race_event_lists")) {
+        c.egs.raceEventLists.clear();
+        for (const QJsonValue v : egs.value("race_event_lists").toArray()) {
+            c.egs.raceEventLists.append(qint64(v.toDouble()));
+        }
+    }
+    c.egs.raceSlotSeconds = qMax<qint64>(60, qint64(egs.value("race_slot_seconds").toDouble(300)));
+    c.egs.racePublicAddress = egs.value("race_public_address").toBool(true);
     if (egs.contains("solo_club_fame")) {
         const QJsonValue v = egs.value("solo_club_fame");
         if (!v.isDouble() || v.toDouble() < 0) {
@@ -205,7 +213,7 @@ QByteArray defaultConfigJson() {
     "base_path": "",
     "log": { "file": "server.log", "max_size_mb": 50, "trace": true, "trace_body_bytes": 65536 },
     "database": { "file": "driveclub.db", "session_days": 30 },
-    "egs": { "server_identifier": "dc-community", "version": "1", "solo_club_fame": 150000 },
+    "egs": { "server_identifier": "dc-community", "version": "1", "solo_club_fame": 150000, "race_event_lists": [1, 4, 5], "race_slot_seconds": 300, "race_public_address": true },
     "otg": { "base_url": "", "domain_id": "driveclub", "zone": "eu" },
     "shadnet": { "url": "http://127.0.0.1:31315",
                  "client_id": "2a347f19-d4c4-492d-aadc-bc07ae7b8c15", "allow_unverified": false },

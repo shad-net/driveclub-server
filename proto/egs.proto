@@ -270,6 +270,7 @@ message GetRemoteUrlResponse {
 }
 
 // ---- statsService.getAccountStats ---------------------------------------------------------------
+
 message GetAccountStatsRequest {
   optional string columnDefinitionSetName = 1;
   optional bool currentAccount = 2;
@@ -801,6 +802,11 @@ message LobbyMember {
   optional bool host = 2;
   optional int32 team = 3;
   optional bytes contentRestriction = 4;
+  optional string id = 5;
+  optional int32 playerNumber = 6;
+  optional bytes memberData = 7;
+  optional string clientVersion = 8;
+  optional bool aiControlled = 9;
 }
 
 message Lobby {
@@ -884,4 +890,262 @@ message LobbyCallbackMessage {
   optional Lobby lobby = 2;
   optional int64 oldMatchSlotId = 3;
   repeated LobbyUpdatedMember updatedMembers = 4;
+}
+
+// ---- Multiplayer events (eventService, matchingService, race lobbies) --------------------------
+
+enum EventValue {
+  EVENT_VALUE_0 = 0;
+  EVENT_VALUE_1 = 1;
+  EVENT_VALUE_2 = 2;
+  EVENT_VALUE_3 = 3;
+  EVENT_VALUE_4 = 4;
+  EVENT_VALUE_5 = 5;
+  EVENT_VALUE_6 = 6;
+  EVENT_VALUE_7 = 7;
+  EVENT_VALUE_8 = 8;
+  EVENT_VALUE_9 = 9;
+  EVENT_VALUE_10 = 10;
+  EVENT_VALUE_11 = 11;
+  EVENT_VALUE_12 = 12;
+}
+
+message GetCurrentSeasonRequest {
+  optional string languageCode = 1;
+}
+
+message SeasonBackground {
+  optional int64 Image = 1;
+  optional int64 logo = 2;
+}
+
+message SeasonDescription {
+  optional string title = 1;
+}
+
+message SeasonConfiguration {
+  optional SeasonBackground background = 1;
+  optional SeasonDescription description = 2;
+}
+
+message EventListObject {
+  optional int64 id = 1;
+  optional string name = 2;
+  optional EventValue status = 3; // 2 = active: the game accepts the season only with one active list
+  optional EventValue type = 4;   // 5 = multiplayer
+}
+
+message EventListColour {
+  optional string eventlistColour = 1; // "#RRGGBB"
+}
+
+message EventListImage {
+  optional int64 billboard = 1;
+  optional int64 eventlistimage = 2;
+}
+
+message EventListMatching {
+  optional int64 interval = 1; // seconds between match slots
+  optional int64 lockoutTime = 2;
+  optional string repeatPeriod = 3;
+  optional bool schedule = 4;
+  optional int64 nextSlotOffsetSeconds = 5;
+  optional int64 postLobbyTransitionTime = 6;
+  optional int64 postLobbyEventSelectTimer = 7;
+  optional int64 matchedIntoTimeout = 8;
+  optional int64 readyUpTime = 9;
+}
+
+message EventListSettings {
+  optional string eventname = 1;
+  optional string vehicleRequirement = 2;
+  optional string featureOverride = 3;
+  optional bool doubleXP = 4;
+}
+
+message EventListTimers {
+  optional int64 endOfRace = 1;
+  optional int64 eventSelect = 2;
+  optional int64 liveLobby = 3;
+  optional int64 mingleTime = 4;
+  optional int64 vehicleSelect = 5;
+  optional int64 viewRaceReport = 6;
+  optional int64 viewResults = 7;
+}
+
+message EventListConfiguration {
+  optional EventListColour colour = 1;
+  optional EventListImage image = 2;
+  optional EventListMatching matching = 3;
+  optional EventListSettings settings = 4;
+  optional EventListTimers timers = 5;
+}
+
+message GameModeObject {
+  optional string name = 1; // Race, Drift, Time Trial, TopSpeed, Team Race...
+}
+
+message GameModeTeam {
+  optional int64 count = 1;
+}
+
+message GameModeConfiguration {
+  optional GameModeTeam team = 1;
+}
+
+message GameModeHolder {
+  optional GameModeObject object = 1;
+  optional GameModeConfiguration configuration = 2;
+}
+
+message TemplateGeneration {
+  optional int64 loanVehicle = 1;
+  optional int64 timeTrialDuration = 2;
+  optional int64 driftDuration = 3;
+  optional int64 minimumLaps = 4;
+}
+
+message TemplatePlayerCount {
+  optional int64 teamSizeMaximum = 1;
+}
+
+message TemplateSettings {
+  optional string vehicleRequirement = 1;
+}
+
+message TemplateEnvironment {
+  optional string fog = 1;
+  optional string precipitation = 2;
+  optional float precipitationDuration = 3;
+  optional int64 seed = 4;
+  optional int64 speedOfTime = 5;
+  optional float timeOfDayFloat = 6;
+  optional string weather = 7;
+}
+
+message TemplateConfiguration {
+  optional TemplateGeneration generation = 1;
+  optional TemplatePlayerCount playerCount = 2;
+  optional TemplateSettings settings = 3;
+  optional TemplateEnvironment environment = 4;
+}
+
+message EventTemplate {
+  optional GameModeHolder gameModeHolder = 1;
+  repeated IdRef tracks = 2;   // tracks.csv UniqueID
+  repeated IdRef vehicles = 3; // vehicles.csv UniqueID
+  optional TemplateConfiguration configuration = 4;
+}
+
+message EventList {
+  optional EventListObject object = 1;
+  repeated EventTemplate templates = 2;
+  optional EventListConfiguration configuration = 3;
+}
+
+message GetCurrentSeasonResponse {
+  repeated EventList eventLists = 1;
+  optional SeasonConfiguration configuration = 2;
+}
+
+message QueryEventListActivityRequest {
+  repeated int64 eventLists = 1;
+}
+
+message EventListActivity {
+  optional int64 eventList = 1;
+  optional int32 players = 2;
+}
+
+message QueryEventListActivityResponse {
+  repeated EventListActivity activity = 1;
+}
+
+message QueryUpcomingMatchSlotsRequest {
+  repeated IdRef eventLists = 1;
+  optional int32 numberOfSlots = 2;
+  optional int64 startDate = 3; // Unix ms
+}
+
+message SlotEventRef {
+  optional IdRef event = 1; // the track
+  optional GameModeHolder gameModeHolder = 2;
+}
+
+message MatchSlot {
+  optional int64 id = 1;
+  optional int64 eventList = 2;
+  optional int64 matchTime = 3; // Unix ms
+  optional SlotEventRef event = 4;
+}
+
+message UpcomingMatchSlot {
+  optional MatchSlot slot = 1;
+  optional int32 players = 2;
+  optional int32 friends = 3;
+  optional int32 clubMates = 4;
+  optional int32 friendsAndClubMates = 5;
+  optional bool registered = 6;
+}
+
+message QueryUpcomingMatchSlotsResponse {
+  repeated UpcomingMatchSlot slots = 1;
+}
+
+message RegisterInterestRequest {
+  optional int64 id = 1;
+  repeated int64 eligiblePartyMembers = 2;
+}
+
+message InterestResponse {
+  optional bool registered = 1;
+  optional IdRef slot = 2;
+}
+
+message QueryInterestRequest {
+  repeated IdRef accounts = 1;
+}
+
+message InterestSlot {
+  optional IdRef slot = 1;
+  optional string startsInMilliSeconds = 2;
+  optional string startsInSeconds = 3;
+}
+
+message QueryInterestResponse {
+  repeated InterestSlot slots = 1;
+}
+
+message QueryMatchSlotsByIdRequest {
+  repeated int64 slotIds = 1;
+}
+
+message MatchSlotCount {
+  optional int64 slotId = 1;
+  optional int32 players = 2;
+  optional int32 friendsAndClubMates = 3;
+}
+
+message QueryMatchSlotsByIdResponse {
+  repeated MatchSlotCount slots = 1;
+}
+
+message MarkReadyRequest {
+  optional int64 matchSlotId = 1;
+}
+
+message MarkReadyResponse {
+  optional int64 id = 1;
+  optional bool ready = 2;
+}
+
+message ProgressToNextRaceRequest {
+  optional string id = 1;
+}
+
+message MatchingCallbackMessage {
+  optional int64 accountId = 1;
+  optional EventValue action = 2;
+  optional int64 matchSlotId = 3;
+  optional int64 startsInMilliseconds = 4;
 }
