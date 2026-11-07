@@ -177,6 +177,11 @@ const char* const Migrations[] = {
         created   INTEGER NOT NULL
     );
     )",
+    // 10: the login's clientSessionData (the game's peer address for race lobbies), so a restored
+    // session can still be matched into a race.
+    R"(
+    ALTER TABLE sessions ADD COLUMN session_data BLOB NOT NULL DEFAULT x'';
+    )",
 };
 
 QMutex& lock() {
@@ -549,7 +554,8 @@ void putSession(const Session& s) {
     QSqlQuery q(connection());
     q.prepare(QStringLiteral(
         "INSERT OR REPLACE INTO sessions (key, account_id, name, shadnet_account, client_version, "
-        "ps_plus, created, last_seen, requests) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        "ps_plus, created, last_seen, requests, session_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, "
+        "?)"));
     q.addBindValue(QString::fromLatin1(s.key));
     q.addBindValue(s.accountId);
     q.addBindValue(text(s.name));
@@ -559,6 +565,7 @@ void putSession(const Session& s) {
     q.addBindValue(s.created);
     q.addBindValue(s.lastSeen);
     q.addBindValue(s.requests);
+    q.addBindValue(s.sessionData);
     run(q, "save session");
 }
 
@@ -585,7 +592,7 @@ QList<Session> sessions() {
     QMutexLocker l(&lock());
     QSqlQuery q(connection());
     q.prepare(QStringLiteral("SELECT key, account_id, name, shadnet_account, client_version, "
-                             "ps_plus, created, last_seen, requests FROM sessions"));
+                             "ps_plus, created, last_seen, requests, session_data FROM sessions"));
     if (run(q, "list sessions")) {
         while (q.next()) {
             Session s;
@@ -598,6 +605,7 @@ QList<Session> sessions() {
             s.created = q.value(6).toLongLong();
             s.lastSeen = q.value(7).toLongLong();
             s.requests = q.value(8).toInt();
+            s.sessionData = q.value(9).toByteArray();
             out.append(s);
         }
     }

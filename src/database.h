@@ -86,6 +86,7 @@ struct Session {
     qint64 created = 0;
     qint64 lastSeen = 0;
     int requests = 0;
+    QByteArray sessionData;
 };
 void putSession(const Session& session);
 void touchSession(const QByteArray& key, qint64 lastSeen, int requests);

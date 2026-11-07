@@ -126,6 +126,7 @@ struct RaceSlot {
     qint64 matchTime = 0; // Unix ms
     qint64 track = 0;
     QList<qint64> registered;
+    QHash<qint64, qint64> registeredBy; // party member -> the leader who signed them up
     QList<qint64> ready;
     bool done = false;
 };
@@ -171,6 +172,19 @@ RaceSlot* slotByIdLocked(qint64 id) {
     return it == matching().slots.end() ? nullptr : &*it;
 }
 
+RaceSlot* slotForIdLocked(qint64 id) {
+    if (RaceSlot* s = slotByIdLocked(id)) {
+        return s;
+    }
+    const qint64 list = id / 1000000000LL, index = id % 1000000000LL;
+    const qint64 t = index * slotIntervalMs();
+    if (id <= 0 || !raceList(list) || t <= QDateTime::currentMSecsSinceEpoch()) {
+        return nullptr;
+    }
+    RaceSlot& s = slotAtLocked(list, t);
+    return s.id == id ? &s : nullptr;
+}
+
 void pushMatchingLocked(qint64 account, int action, qint64 slot, qint64 startsInMs) {
     MatchingCallbackMessage m;
     m.set_accountid(account);
@@ -180,6 +194,17 @@ void pushMatchingLocked(qint64 account, int action, qint64 slot, qint64 startsIn
         m.set_startsinmilliseconds(startsInMs);
     }
     pushLocked(account, QByteArrayLiteral("MatchingCallbackMessage"), m.SerializeAsString());
+}
+
+// Takes `account` off every slot but `keep` (one slot at a time per player).
+void unregisterElsewhereLocked(qint64 account, const RaceSlot* keep) {
+    for (RaceSlot& other : matching().slots) {
+        if (&other != keep && other.registered.removeAll(account) > 0) {
+            other.ready.removeAll(account);
+            other.registeredBy.remove(account);
+            pushMatchingLocked(account, MatchUnregistered, other.id);
+        }
+    }
 }
 
 QSet<qint64> knownPlayers(qint64 account) {
@@ -395,24 +420,37 @@ void registerInterest(Context& ctx, const RegisterInterestRequest& req, Interest
     const qint64 account = sessionAccount(ctx, &me);
     resp.mutable_slot()->set_id(req.id());
     QMutexLocker lock(&sessions().mutex);
-    RaceSlot* slot = slotByIdLocked(req.id());
+    RaceSlot* slot = slotForIdLocked(req.id());
     if (account == 0 || !slot || slot->done) {
         resp.set_registered(false);
+        qCInfo(lcEgs).noquote() << lobbyWho(account, me) << "cannot register for race slot"
+                                << req.id() << (slot ? "(already matched)" : "(no such slot)");
         return;
     }
-    for (RaceSlot& other : matching().slots) {
-        if (&other != slot && other.registered.removeAll(account) > 0) {
-            other.ready.removeAll(account);
-            pushMatchingLocked(account, MatchUnregistered, other.id);
+    QList<qint64> who{account};
+    for (const qint64 m : req.eligiblepartymembers()) {
+        if (m != 0 && !who.contains(m) && newestSessionLocked(m)) {
+            who.append(m);
         }
     }
-    if (!slot->registered.contains(account)) {
-        slot->registered.append(account);
-    }
     const qint64 left = qMax<qint64>(0, slot->matchTime - QDateTime::currentMSecsSinceEpoch());
-    pushMatchingLocked(account, MatchRegistered, slot->id, left);
+    QStringList names;
+    for (const qint64 a : who) {
+        unregisterElsewhereLocked(a, slot);
+        if (!slot->registered.contains(a)) {
+            slot->registered.append(a);
+        }
+        if (a != account) {
+            slot->registeredBy.insert(a, account);
+        }
+        pushMatchingLocked(a, MatchRegistered, slot->id, left);
+        if (const Session* s = newestSessionLocked(a)) {
+            names.append(s->name);
+        }
+    }
     resp.set_registered(true);
     qCInfo(lcEgs).noquote() << lobbyWho(account, me) << "registered for race slot" << slot->id
+                            << (who.size() > 1 ? "with party " + names.join(", ") : QString())
                             << "(list" << slot->eventList << ", track" << slot->track << ", in"
                             << left / 1000 << "s," << slot->registered.size() << "registered)";
 }
@@ -426,9 +464,26 @@ void unregisterInterest(Context& ctx, const RegisterInterestRequest& req, Intere
     if (RaceSlot* slot = slotByIdLocked(req.id());
         slot && slot->registered.removeAll(account) > 0) {
         slot->ready.removeAll(account);
+        slot->registeredBy.remove(account);
         pushMatchingLocked(account, MatchUnregistered, slot->id);
+        // A leader taking the party off takes off the members it signed up.
+        int members = 0;
+        for (auto it = slot->registeredBy.begin(); it != slot->registeredBy.end();) {
+            if (it.value() == account) {
+                slot->registered.removeAll(it.key());
+                slot->ready.removeAll(it.key());
+                pushMatchingLocked(it.key(), MatchUnregistered, slot->id);
+                ++members;
+                it = slot->registeredBy.erase(it);
+            } else {
+                ++it;
+            }
+        }
         qCInfo(lcEgs).noquote() << lobbyWho(account, me) << "unregistered from race slot"
-                                << slot->id;
+                                << slot->id
+                                << (members > 0
+                                        ? QStringLiteral("with %1 party member(s)").arg(members)
+                                        : QString());
     }
 }
 
@@ -484,7 +539,7 @@ void markReady(Context& ctx, const MarkReadyRequest& req, MarkReadyResponse& res
     resp.set_id(req.matchslotid());
     resp.set_ready(ready);
     QMutexLocker lock(&sessions().mutex);
-    if (RaceSlot* s = slotByIdLocked(req.matchslotid())) {
+    if (RaceSlot* s = slotForIdLocked(req.matchslotid())) {
         s->ready.removeAll(account);
         if (ready) {
             s->ready.append(account);
@@ -565,7 +620,7 @@ void matchingTickLocked(qint64 now) {
         Party p;
         p.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
         p.type = 0;
-        p.status = 6; // matching complete; the join parser needs the field, nothing reads it
+        p.status = 6;
         p.matchSlotId = slot.id;
         p.eventListId = slot.eventList;
         for (const qint64 a : std::as_const(slot.registered)) {

@@ -321,6 +321,7 @@ void egsRestoreSessions() {
         s.created = d.created;
         s.lastSeen = d.lastSeen;
         s.requests = d.requests;
+        s.sessionData = d.sessionData.toStdString();
         sessions().byKey.insert(s.key, s);
     }
     if (!sessions().byKey.isEmpty()) {

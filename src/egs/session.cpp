@@ -48,7 +48,8 @@ void login(Context& ctx, const OAuthLoginRequest& req, OAuthLoginResponse& resp)
 
     rememberPlayer(s.accountId, name, true, s.shadnetAccount);
     db::putSession({s.key, s.accountId, s.name, s.shadnetAccount, s.clientVersion, s.psPlus,
-                    s.created, s.lastSeen, s.requests});
+                    s.created, s.lastSeen, s.requests,
+                    QByteArray(s.sessionData.data(), qsizetype(s.sessionData.size()))});
 
     SessionKey* key = resp.mutable_sessionkey();
     key->set_id(s.key.toStdString());
