@@ -17,16 +17,16 @@ struct GameTrack {
 };
 
 struct GameVehicle {
-    QString id;   // UniqueID, e.g. "52" (the "veh:<id>" of score attachments)
-    QString code; // e.g. "ren_alp"
-    QString name; // e.g. "Renault Alpine A110-50"
+    QString id;           // UniqueID, e.g. "52" (the "veh:<id>" of score attachments)
+    QString code;         // e.g. "ren_alp"
+    QString name;         // e.g. "Renault Alpine A110-50"
     QString vehicleClass; // Hot Hatch, Sports, Performance, Super, Hyper, Bonus, Superbike
     int playerUnlockLevel = 0;
     int clubUnlockLevel = 0; // 0 = not unlocked by club level
 };
 
 struct GameData {
-    QString dir;   // the folder read, empty = none
+    QString dir;         // the folder read, empty = none
     QStringList loaded;  // files read, e.g. "tracks.csv (120)"
     QStringList missing; // files not found or not readable
     QList<GameTrack> tracks;
