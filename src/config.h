@@ -4,8 +4,8 @@
 #pragma once
 
 #include "auth.h"
-#include "egs.h"
-#include "otg.h"
+#include "egs/egs.h"
+#include "otg/otg.h"
 
 #include <QByteArray>
 #include <QHostAddress>

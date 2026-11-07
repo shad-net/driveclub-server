@@ -574,7 +574,6 @@ message GetAccoladeProgressRequest {
   optional int64 accountId = 4;
 }
 
-// Builder 0x6359A0, the same with currentClub and clubId.
 message GetClubAccoladeProgressRequest {
   optional bool currentClub = 1;
   optional int64 accoladeId = 2;
@@ -1148,4 +1147,78 @@ message MatchingCallbackMessage {
   optional EventValue action = 2;
   optional int64 matchSlotId = 3;
   optional int64 startsInMilliseconds = 4;
+}
+
+// ---- configurationService, activityService ------------------------------------------------------
+
+message TelemetryConfig {
+  optional string destinationRoot = 1;
+  optional string environment = 2;
+  optional string messageServer = 3;
+  optional string password = 4;
+  optional string port = 5;
+  optional string username = 6;
+  optional string virtualHost = 7;
+  repeated string enabledMessages = 8;
+}
+
+message UiConfig {
+  optional bool enableButtonChallenge = 1;
+  optional bool enableButtonChallengeCreate = 2;
+  optional bool enableButtonDrive = 3;
+  optional bool enableButtonMultiPlayer = 4;
+  optional bool enableButtonSingleEvent = 5;
+  optional bool enableButtonTour = 6;
+  optional bool enableButtonFacebook = 7;
+  optional bool betaIsActive = 8;
+}
+
+message GameConfiguration {
+  optional TelemetryConfig telemetry = 1;
+  optional UiConfig uiConfig = 2;
+}
+
+message GlobalGameConfiguration {
+  optional GameConfiguration configuration = 1;
+}
+
+message GetActivityFeedRequest {
+  optional EventValue feedType = 1;
+  optional int64 feedId = 2;
+  optional string language = 3;
+  optional int64 maxVersion = 4;
+  optional int32 maximumEntries = 5;
+}
+
+message ActivityEntry {
+  optional int64 id = 1;
+  optional int64 version = 2;
+  optional int64 createdBy = 3;
+  optional EventValue authorType = 4;
+  optional EventValue verb = 5;
+  optional EventValue subjectType = 6;
+  optional int64 club = 7;
+  optional int64 createdByClub = 8;
+  optional int64 subjectId = 9;
+  optional string createdOn = 10;
+  optional float globalRelevance = 11;
+  optional string localizedActivityText = 12;
+  optional string localizedElapsedTimeText = 13;
+}
+
+message GetActivityFeedResponse {
+  repeated ActivityEntry entries = 1;
+  repeated IdRef clubs = 2;
+}
+
+message GetNotificationsRequest {
+  optional int32 maximumEntries = 1;
+  optional int64 minVersion = 2;
+  repeated EventValue orders = 3;
+  optional int64 maxVersion = 4;
+  optional string language = 5;
+}
+
+message GetNotificationsResponse {
+  repeated ActivityEntry entries = 1;
 }

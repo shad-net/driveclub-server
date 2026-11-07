@@ -11,13 +11,6 @@
 
 #include <optional>
 
-// OTG (leaderboards, challenges, stats, accolades), all JSON over HTTP.
-//
-// 1. GET https://hub.services.otg.scee.com/titles/driveclub/domains
-// 2. GET <auth>/login/driveclub?provider=psn&code=<NpAuth code>
-// 3. Services under <gateway>/<zone>/<serverIdentifier>/v01/<resource>. Leaderboards
-//    (<board>/~leaderboard reads, score posts) and counter gamestates (<...>/~gamestate) are
-//    handled, other resources get 404 and a log line.
 struct OtgConfig {
     QString baseUrl;
     quint16 listenPort = 8080; // listen.port, for requests without a Host header

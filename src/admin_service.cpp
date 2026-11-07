@@ -7,10 +7,10 @@
 #include "database.h"
 
 #include <QDateTime>
-#include "egs.h"
+#include "egs/egs.h"
 #include "file_log.h"
 #include "game_data.h"
-#include "otg.h"
+#include "otg/otg.h"
 #include "request_log.h"
 #include "version.h"
 

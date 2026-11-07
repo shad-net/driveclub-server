@@ -14,6 +14,8 @@
 
 #include <optional>
 
+// EGS ("Evolution Game Services") over https://<gmServer>/egs/binary/<service>/<method>.
+
 constexpr char EgsKey[] = "ca91f51f-a7f5-4b95-814a-5796cfff586c";
 
 struct EgsConfig {
@@ -40,6 +42,7 @@ struct EgsConfig {
 };
 
 void setEgsConfig(const EgsConfig& config);
+
 QByteArray egsSignature(const QString& method, const QByteArray& sessionKey,
                         const QByteArray& body);
 std::optional<QByteArray> egsFindSessionKey(const QString& method, const QByteArray& body,
@@ -48,7 +51,6 @@ QString egsSessionName(const QByteArray& sessionKey);
 QByteArray egsDescriptor();
 QString egsDescribeBody(const QString& path, bool response, int status, const QByteArray& body);
 
-// Signed-in players, for the admin API.
 struct EgsSessionInfo {
     QString key;
     QString name;
@@ -77,8 +79,10 @@ struct EgsPartyInfo {
     QList<EgsPartyMember> members;
 };
 QList<EgsPartyInfo> egsParties();
+
 QSet<qint64> egsOnlineAccounts();
 QHash<qint64, qint64> egsLastPolls();
+
 struct EgsPlayerInfo {
     qint64 accountId = 0;
     QString name;

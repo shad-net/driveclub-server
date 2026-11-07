@@ -3,7 +3,7 @@
 
 #include "trace.h"
 
-#include "egs.h"
+#include "egs/egs.h"
 #include "proto_dump.h"
 
 #include <QAtomicInteger>

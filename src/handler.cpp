@@ -3,8 +3,8 @@
 
 #include "handler.h"
 
-#include "egs.h"
-#include "otg.h"
+#include "egs/egs.h"
+#include "otg/otg.h"
 
 #include <QLoggingCategory>
 

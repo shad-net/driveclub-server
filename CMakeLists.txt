@@ -46,13 +46,16 @@ add_executable(driveclubsrv
     src/auth.cpp src/auth.h
     src/config.cpp src/config.h
     src/database.cpp src/database.h
-    src/egs.cpp src/egs.h
+    src/egs/accolades.cpp src/egs/api.cpp src/egs/club.cpp src/egs/core.cpp src/egs/fame.cpp
+    src/egs/lobby.cpp src/egs/matching.cpp src/egs/session.cpp src/egs/stats.cpp src/egs/storage.cpp
+    src/egs/egs.h src/egs/internal.h
     src/file_log.cpp src/file_log.h
     src/game_data.cpp src/game_data.h
     src/handler.cpp src/handler.h
     src/http_server.cpp src/http_server.h
     src/main.cpp
-    src/otg.cpp src/otg.h
+    src/otg/admin.cpp src/otg/api.cpp src/otg/core.cpp src/otg/gamestate.cpp src/otg/leaderboards.cpp
+    src/otg/otg.h src/otg/internal.h
     src/proto_dump.cpp src/proto_dump.h
     src/request_log.cpp src/request_log.h
     src/shadnet_verifier.cpp src/shadnet_verifier.h
@@ -60,6 +63,7 @@ add_executable(driveclubsrv
     src/version.cpp src/version.h
 )
 target_link_libraries(driveclubsrv PRIVATE Qt6::Core Qt6::Network Qt6::Sql egs_proto)
+target_include_directories(driveclubsrv PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 # moc only for the server itself, not for the protobuf targets in externals/.
 set_target_properties(driveclubsrv PROPERTIES AUTOMOC ON)
 
