@@ -7,7 +7,7 @@
 
 namespace egs {
 
-void fillLobby(::Lobby* out, const Party& p) {
+void fillLobby(::Lobby* out, const Party& p, qint64 viewer) {
     out->set_id(p.id.toStdString());
     out->set_lobbytype(static_cast<LobbyValue>(p.type));
     out->set_status(static_cast<LobbyValue>(p.status));
@@ -29,7 +29,8 @@ void fillLobby(::Lobby* out, const Party& p) {
         if (p.type == 0) {
             lm->set_id(std::to_string(m.accountId));
             lm->set_playernumber(m.playerNumber);
-            lm->set_memberdata(m.memberData);
+            const bool own = viewer != 0 && m.accountId == viewer && !m.ownMemberData.empty();
+            lm->set_memberdata(own ? m.ownMemberData : m.memberData);
             lm->set_clientversion(m.clientVersion.toStdString());
             lm->set_aicontrolled(false);
         }
@@ -43,13 +44,19 @@ void pushLobbyLocked(const Party& p, int action, const QList<qint64>& updated, Q
     for (const qint64 u : updated) {
         m.add_updatedmembers()->mutable_sessionkey()->set_accountid(u);
     }
-    const std::string data = m.SerializeAsString();
+    std::string data = m.SerializeAsString();
     std::sort(to.begin(), to.end());
     to.erase(std::unique(to.begin(), to.end()), to.end());
     for (const qint64 a : to) {
-        if (a != 0) {
-            pushLocked(a, QByteArrayLiteral("LobbyCallbackMessage"), data);
+        if (a == 0) {
+            continue;
         }
+        if (p.type == 0) { // race lobby: each member gets its own entry as its game sent it
+            m.mutable_lobby()->Clear();
+            fillLobby(m.mutable_lobby(), p, a);
+            data = m.SerializeAsString();
+        }
+        pushLocked(a, QByteArrayLiteral("LobbyCallbackMessage"), data);
     }
 }
 
@@ -90,7 +97,6 @@ QString leavePartyLocked(qint64 account, int type, int action, const QList<qint6
     return id;
 }
 
-// Every lobby an account is in (on going offline).
 void leaveAllPartiesLocked(qint64 account) {
     QList<int> types;
     for (auto it = parties().ofAccount.cbegin(); it != parties().ofAccount.cend(); ++it) {
@@ -100,10 +106,11 @@ void leaveAllPartiesLocked(qint64 account) {
     }
     for (const int t : types) {
         const QString id = leavePartyLocked(account, t);
-        // egsPlayerName() takes the sessions lock, so only the account id here.
         qCInfo(lcEgs).noquote() << "account" << account << "went offline: left lobby" << id;
     }
 }
+
+// ---- lobbyService: parties --------------------------------------------------------------------
 
 QString lobbyWho(qint64 account, const QString& name) {
     return name.isEmpty() ? QString::number(account) : name;
@@ -145,7 +152,7 @@ void getLobby(Context& ctx, const LobbyWithMemberRequest& req, LobbiesResponse& 
     const QString id = parties().ofAccount.value(qMakePair(account, int(req.lobby().lobbytype())));
     const auto it = parties().byId.constFind(id);
     if (!id.isEmpty() && it != parties().byId.cend()) {
-        fillLobby(resp.add_lobbies(), *it);
+        fillLobby(resp.add_lobbies(), *it, account);
     }
 }
 
@@ -165,7 +172,6 @@ void joinWithAccount(Context& ctx, const LobbyJoinWithAccountRequest& req, Empty
     auto it = parties().byId.find(id);
     if (account == 0 || target == 0 || id.isEmpty() || it == parties().byId.end() ||
         !online.contains(target)) {
-        // -18009: the game's "SessionMemberOfflineMessage" (error handler 0x639060).
         ctx.status = 500;
         ctx.serviceErrorCode = -18009;
         ctx.serviceError = "member offline";
@@ -188,7 +194,6 @@ void joinWithAccount(Context& ctx, const LobbyJoinWithAccountRequest& req, Empty
         it->members.append(m);
         parties().ofAccount.insert(qMakePair(account, type), id);
     }
-    // Everyone, the joiner included: the joiner's game takes its party from this push.
     pushLobbyLocked(*it, LobbyJoined, {account}, partyAccounts(*it));
     qCInfo(lcEgs).noquote() << lobbyWho(account, me) << "joined"
                             << QStringLiteral("%1's party").arg(targetName) << id << "->"
@@ -201,7 +206,6 @@ void updateLobby(Context& ctx, const LobbyWithMemberRequest& req, Empty&) {
     const int type = req.lobby().lobbytype();
     QMutexLocker lock(&sessions().mutex);
     auto it = parties().byId.find(parties().ofAccount.value(qMakePair(account, type)));
-    // Always answered: an error would clear the party's active flag in the game.
     if (it == parties().byId.end()) {
         return;
     }
@@ -259,7 +263,6 @@ void leaveLobbyById(Context& ctx, const LobbyLeaveByIdRequest& req, LobbyLeaveBy
         QMutexLocker lock(&sessions().mutex);
         QList<int> types;
         for (auto it = parties().ofAccount.cbegin(); it != parties().ofAccount.cend(); ++it) {
-            // An empty id (sent by a kicked player, who is already out) leaves nothing.
             if (it.key().first == account && !wanted.isEmpty() && it.value() == wanted) {
                 types.append(it.key().second);
             }

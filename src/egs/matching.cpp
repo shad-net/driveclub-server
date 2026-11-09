@@ -8,6 +8,8 @@
 
 namespace egs {
 
+// ---- Multiplayer events: eventService.getCurrentSeason, matchingService, race lobbies ---------
+
 constexpr int MatchRegistered = 1, MatchUnregistered = 2, LobbyMatched = 10;
 constexpr int ErrNoNextRace = -18025;
 
@@ -196,7 +198,6 @@ void pushMatchingLocked(qint64 account, int action, qint64 slot, qint64 startsIn
     pushLocked(account, QByteArrayLiteral("MatchingCallbackMessage"), m.SerializeAsString());
 }
 
-// Takes `account` off every slot but `keep` (one slot at a time per player).
 void unregisterElsewhereLocked(qint64 account, const RaceSlot* keep) {
     for (RaceSlot& other : matching().slots) {
         if (&other != keep && other.registered.removeAll(account) > 0) {
@@ -266,10 +267,15 @@ PartyMember raceMemberLocked(qint64 account, int number) {
     if (const Session* s = newestSessionLocked(account)) {
         m.name = s->name;
         m.memberData = memberDataFor(*s);
+        m.ownMemberData = s->sessionData;
+        if (!m.ownMemberData.empty()) {
+            m.ownMemberData.resize(22, '\0');
+        }
         m.clientVersion = s->clientVersion;
     } else {
         m.memberData.assign(22, '\0');
     }
+    // The member's party carries its content restriction (DLC it owns).
     const QString partyId = parties().ofAccount.value(qMakePair(account, 1));
     if (const auto it = parties().byId.constFind(partyId); it != parties().byId.cend()) {
         for (const PartyMember& pm : it->members) {
@@ -566,7 +572,7 @@ void joinLobby(Context& ctx, const LobbyWithMemberRequest& req, LobbiesResponse&
         it->members.append(raceMemberLocked(account, int(it->members.size())));
     }
     parties().ofAccount.insert(qMakePair(account, 0), it->id);
-    fillLobby(resp.add_lobbies(), *it);
+    fillLobby(resp.add_lobbies(), *it, account);
 }
 
 void progressToNextRace(Context& ctx, const ProgressToNextRaceRequest& req, LobbiesResponse& resp) {
@@ -596,7 +602,7 @@ void progressToNextRace(Context& ctx, const ProgressToNextRaceRequest& req, Lobb
     ::Lobby* l = resp.add_lobbies();
     const auto it = parties().byId.constFind(id);
     if (it != parties().byId.cend()) {
-        fillLobby(l, *it);
+        fillLobby(l, *it, account);
     } else {
         l->set_id(id.toStdString());
         l->set_lobbytype(LOBBY_VALUE_0);

@@ -54,6 +54,7 @@ add_executable(driveclubsrv
     src/handler.cpp src/handler.h
     src/http_server.cpp src/http_server.h
     src/main.cpp
+    src/telemetry.cpp src/telemetry.h
     src/otg/admin.cpp src/otg/api.cpp src/otg/core.cpp src/otg/gamestate.cpp src/otg/leaderboards.cpp
     src/otg/otg.h src/otg/internal.h
     src/proto_dump.cpp src/proto_dump.h

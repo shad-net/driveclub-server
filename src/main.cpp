@@ -12,6 +12,7 @@
 #include "http_server.h"
 #include "otg/otg.h"
 #include "request_log.h"
+#include "telemetry.h"
 #include "trace.h"
 #include "version.h"
 
@@ -195,6 +196,19 @@ int main(int argc, char* argv[]) {
           qPrintable(config->address.toString()), config->port,
           qPrintable(basePath.isEmpty() ? QStringLiteral("/") : basePath),
           config->trace ? "on" : "off");
+
+    TelemetryCollector telemetry;
+    if (config->telemetryPort == 0) {
+        qInfo("telemetry collector off (telemetry.port 0)");
+    } else if (!telemetry.listen(config->telemetryAddress, config->telemetryPort, &error)) {
+        return fatal(QStringLiteral("cannot listen on %1:%2 for game telemetry: %3")
+                         .arg(config->telemetryAddress.toString())
+                         .arg(config->telemetryPort)
+                         .arg(error));
+    } else {
+        qInfo("game telemetry (STOMP) on %s:%u", qPrintable(config->telemetryAddress.toString()),
+              config->telemetryPort);
+    }
 
     AdminService admin(*config);
     HttpServer adminServer([&admin](const HttpRequest& request, HttpServer::Responder respond) {

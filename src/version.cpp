@@ -8,7 +8,7 @@
 
 namespace {
 
-constexpr const char* m_version = "0.0.20";
+constexpr const char* m_version = "0.0.21";
 
 QString IsoBuildDate() {
     static const QStringList months = {

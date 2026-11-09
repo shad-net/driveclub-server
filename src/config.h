@@ -30,6 +30,8 @@ struct Config {
     QHostAddress adminAddress = QHostAddress::LocalHost;
     quint16 adminPort = 8081;
     QString adminKey;
+    QHostAddress telemetryAddress = QHostAddress::Any;
+    quint16 telemetryPort = 0;
     QString gameDataDir;
 };
 

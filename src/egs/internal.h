@@ -102,7 +102,8 @@ struct PartyMember {
     std::string contentRestriction;
     // Race lobbies (type 0) only.
     int playerNumber = 0;
-    std::string memberData;
+    std::string memberData; // as the other members see it (public address, see memberDataFor)
+    std::string ownMemberData;
     QString clientVersion;
 };
 
@@ -112,7 +113,6 @@ struct Party {
     int status = 1; // LobbyStatus 1 = created; the leader sets its own with updateLobby
     qint64 matchSlotId = 0;
     QList<PartyMember> members;
-    // Race lobbies (type 0) only.
     qint64 eventListId = 0;
     qint64 nextSlot = 0; // chosen by the first progressToNextRace
 };
@@ -182,6 +182,8 @@ Endpoint endpoint(const char* service, const char* method, bool secure, bool lis
 std::string endpointList();
 
 constexpr int ClubMaxMembers = 6;
+
+// ---- Functions shared between the parts (defined in the file of their section) ---------------
 EgsConfig& config();
 QSet<qint64> onlineAccountsLocked(qint64 now);
 void pushLocked(qint64 account, const QByteArray& type, const std::string& data);
@@ -216,7 +218,9 @@ void addFriends(Context& ctx, const FriendsChangeRequest& req, GetFriendsRespons
 void removeFriends(Context& ctx, const FriendsChangeRequest& req, GetFriendsResponse& resp);
 void queryStatus(Context& ctx, const QueryStatusRequest& req, QueryStatusResponse& resp);
 void quickSearch(Context& ctx, const AccountQuickSearchRequest& req, AccountListResponse& resp);
-void fillLobby(::Lobby* out, const Party& p);
+// `viewer`: the account the lobby is for. In a race lobby its own entry carries its own
+// memberData unchanged; the others carry the address it should connect to.
+void fillLobby(::Lobby* out, const Party& p, qint64 viewer = 0);
 void pushLobbyLocked(const Party& p, int action, const QList<qint64>& updated, QList<qint64> to);
 QList<qint64> partyAccounts(const Party& p);
 QString leavePartyLocked(qint64 account, int type, int action = LobbyLeft,

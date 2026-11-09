@@ -202,6 +202,18 @@ std::optional<Config> loadConfig(const QByteArray& json, QString* error) {
     if (!c.adminKey.isEmpty() && c.adminKey.size() < 8) {
         return failed(error, QStringLiteral("admin.key must be at least 8 characters"));
     }
+    const QJsonObject telemetry = root.value("telemetry").toObject();
+    if (telemetry.contains("address") &&
+        !c.telemetryAddress.setAddress(telemetry.value("address").toString())) {
+        return failed(error, QStringLiteral("telemetry.address is not an IP address"));
+    }
+    if (telemetry.contains("port")) {
+        qint64 port = 0;
+        if (!readInt(telemetry.value("port"), 0, 65535, &port)) {
+            return failed(error, QStringLiteral("telemetry.port must be 0..65535 (0 = off)"));
+        }
+        c.telemetryPort = static_cast<quint16>(port);
+    }
     return c;
 }
 
@@ -218,6 +230,7 @@ QByteArray defaultConfigJson() {
     "shadnet": { "url": "http://127.0.0.1:31315",
                  "client_id": "2a347f19-d4c4-492d-aadc-bc07ae7b8c15", "allow_unverified": false },
     "admin": { "address": "127.0.0.1", "port": 8081, "key": "@KEY@" },
+    "telemetry": { "address": "0.0.0.0", "port": 0 },
     "game_data": { "dir": "" }
 }
 )");
