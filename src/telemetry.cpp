@@ -147,9 +147,9 @@ bool TelemetryCollector::handleFrame(QTcpSocket* socket, const QByteArray& comma
     };
     if (command == "CONNECT" || command == "STOMP") {
         qCInfo(lcTelemetry).noquote()
-            << who(socket) << "STOMP connect: host" << headers.value("host")
-            << ", login" << headers.value("login") << ", versions"
-            << headers.value("accept-version") << ", heart-beat" << headers.value("heart-beat");
+            << who(socket) << "STOMP connect: host" << headers.value("host") << ", login"
+            << headers.value("login") << ", versions" << headers.value("accept-version")
+            << ", heart-beat" << headers.value("heart-beat");
         // heart-beat 0,0: no heart-beats either way, so idle connections are never dropped.
         socket->write("CONNECTED\nversion:1.2\nheart-beat:0,0\nserver:driveclub-server\n\n" +
                       QByteArray(1, '\0'));
@@ -158,11 +158,11 @@ bool TelemetryCollector::handleFrame(QTcpSocket* socket, const QByteArray& comma
     if (command == "SEND") {
         QByteArray shown = body;
         if (shown.size() > kMaxLoggedBody) {
-            shown = shown.left(kMaxLoggedBody) + "... (" + QByteArray::number(body.size()) +
-                    " bytes)";
+            shown =
+                shown.left(kMaxLoggedBody) + "... (" + QByteArray::number(body.size()) + " bytes)";
         }
-        qCInfo(lcTelemetry).noquote() << who(socket) << headers.value("destination") << ":"
-                                      << QString::fromUtf8(shown);
+        qCInfo(lcTelemetry).noquote()
+            << who(socket) << headers.value("destination") << ":" << QString::fromUtf8(shown);
         receipt();
         return true;
     }

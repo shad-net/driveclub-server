@@ -217,9 +217,10 @@ void changeFriends(Context& ctx, const FriendsChangeRequest& req, GetFriendsResp
 void addFriends(Context& ctx, const FriendsChangeRequest& req, GetFriendsResponse& resp);
 void removeFriends(Context& ctx, const FriendsChangeRequest& req, GetFriendsResponse& resp);
 void queryStatus(Context& ctx, const QueryStatusRequest& req, QueryStatusResponse& resp);
+void updateStreamingStatus(Context& ctx, const UpdateStreamingStatusRequest& req, Empty& resp);
+void clearMyAuthToken(Context& ctx, const Empty& req, Empty& resp);
+void getGames(Context& ctx, const GetGamesRequest& req, GetGamesResponse& resp);
 void quickSearch(Context& ctx, const AccountQuickSearchRequest& req, AccountListResponse& resp);
-// `viewer`: the account the lobby is for. In a race lobby its own entry carries its own
-// memberData unchanged; the others carry the address it should connect to.
 void fillLobby(::Lobby* out, const Party& p, qint64 viewer = 0);
 void pushLobbyLocked(const Party& p, int action, const QList<qint64>& updated, QList<qint64> to);
 QList<qint64> partyAccounts(const Party& p);

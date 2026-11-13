@@ -65,8 +65,6 @@ message StatusResult {
   optional RetryHint retryHint = 1;
 }
 
-// ---- profileService ----------------------------------------------------------------------
-
 message GetMinimalProfilesRequest {
   repeated int64 accounts = 1;
   optional bool withProgression = 2;
@@ -1221,4 +1219,110 @@ message GetNotificationsRequest {
 
 message GetNotificationsResponse {
   repeated ActivityEntry entries = 1;
+}
+
+// ---- Small services (0.96) -----------------------------------------------------------------------
+
+enum EventListType {
+  EVENT_LIST_TYPE_0 = 0;
+  EVENT_LIST_TYPE_1 = 1;
+  EVENT_LIST_TYPE_2 = 2;
+  EVENT_LIST_TYPE_3 = 3;
+  EVENT_LIST_TYPE_4 = 4;
+  EVENT_LIST_TYPE_5 = 5; // multiplayer (egsconstants.lua)
+  EVENT_LIST_TYPE_6 = 6;
+  EVENT_LIST_TYPE_7 = 7;
+  EVENT_LIST_TYPE_8 = 8;
+  EVENT_LIST_TYPE_9 = 9;
+  EVENT_LIST_TYPE_10 = 10;
+  EVENT_LIST_TYPE_11 = 11;
+  EVENT_LIST_TYPE_12 = 12;
+  EVENT_LIST_TYPE_13 = 13;
+  EVENT_LIST_TYPE_14 = 14;
+  EVENT_LIST_TYPE_15 = 15;
+}
+
+enum GamePlayerStatus {
+  GAME_PLAYER_STATUS_0 = 0;
+  GAME_PLAYER_STATUS_1 = 1;
+  GAME_PLAYER_STATUS_2 = 2;
+  GAME_PLAYER_STATUS_3 = 3;
+  GAME_PLAYER_STATUS_4 = 4;
+  GAME_PLAYER_STATUS_5 = 5;
+  GAME_PLAYER_STATUS_6 = 6;
+  GAME_PLAYER_STATUS_7 = 7;
+}
+
+message ResultRange {
+  optional int32 start = 1;           // page * 30
+  optional int32 numberOfResults = 2; // 30
+}
+
+message GetGamesRequest {
+  repeated EventListType eventListTypes = 1;
+  optional GamePlayerStatus gamePlayerStatus = 2;
+  repeated IdRef players = 3; // the caller
+  optional ResultRange range = 4;
+}
+
+message GameEventLevel {
+  optional int64 level = 1;
+}
+
+message GameEventGrid {
+}
+
+message GameEventInfo {
+  optional int64 id = 1;
+  optional int64 eventList = 2;
+  optional TemplateEnvironment environment = 3;
+  optional string eventDynamicConfiguration = 4;
+  optional TemplateGeneration generation = 5;
+  optional GameEventGrid grid = 6;
+  optional TemplateSettings settings = 7;
+  optional GameEventLevel trackInfrastructure = 8;
+}
+
+message NameRef {
+  optional string name = 1;
+}
+
+message GameEvent {
+  optional GameEventInfo event = 1;
+  optional GameModeHolder gameModeHolder = 2;
+  repeated NameRef permittedVehicles = 3;
+  optional IdRef track = 4;
+}
+
+message GameTimes {
+  optional int64 createdOn = 1;
+  optional int64 endTime = 2; // used when present, else createdOn
+}
+
+message GamePlayerResult {
+  optional int64 gameTime = 1;
+  optional int32 position = 2;
+  optional int64 score = 3;
+}
+
+message GamePlayer {
+  optional IdRef account = 1;
+  optional IdRef player = 2;
+  optional GamePlayerResult result = 3;
+  optional NameRef vehicle = 4;
+}
+
+message GameRecord {
+  optional GameEvent event = 1;
+  optional GameTimes game = 2;
+  repeated GamePlayer players = 3;
+}
+
+message GetGamesResponse {
+  repeated GameRecord games = 1;
+}
+
+message UpdateStreamingStatusRequest {
+  optional bool streaming = 1;
+  optional string streamingUrl = 2;
 }

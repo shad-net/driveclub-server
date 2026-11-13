@@ -216,6 +216,27 @@ void removeFriends(Context& ctx, const FriendsChangeRequest& req, GetFriendsResp
     changeFriends(ctx, req, resp, false);
 }
 
+void updateStreamingStatus(Context& ctx, const UpdateStreamingStatusRequest& req, Empty&) {
+    QString me;
+    const qint64 account = sessionAccount(ctx, &me);
+    qCInfo(lcEgs).noquote() << lobbyWho(account, me)
+                            << (req.streaming() ? "started streaming" : "stopped streaming")
+                            << QString::fromStdString(req.streamingurl());
+}
+
+void clearMyAuthToken(Context& ctx, const Empty&, Empty&) {
+    QString me;
+    const qint64 account = sessionAccount(ctx, &me);
+    qCInfo(lcEgs).noquote() << lobbyWho(account, me) << "clearMyAuthToken (nothing kept)";
+}
+
+void getGames(Context& ctx, const GetGamesRequest& req, GetGamesResponse&) {
+    QString me;
+    const qint64 account = sessionAccount(ctx, &me);
+    qCInfo(lcEgs).noquote() << lobbyWho(account, me) << "getGames from" << req.range().start()
+                            << "(" << req.eventlisttypes_size() << "event list types): 0 games";
+}
+
 void queryStatus(Context& ctx, const QueryStatusRequest& req, QueryStatusResponse& resp) {
     QString me;
     const qint64 account = sessionAccount(ctx, &me);
